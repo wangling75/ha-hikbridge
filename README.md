@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.6
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.7
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.6
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.6 ./hikbridge
+docker build -t hikbridge:0.2.7 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -159,11 +159,14 @@ cp options.example.json options.json
     }
   ],
   "speak_sample_rate": "16000",
-  "auth_token": "CHANGE_ME_TOKEN"
+  "auth_token": "CHANGE_ME_TOKEN",
+  "ssl": false,
+  "ssl_port": 8655
 }
 ```
 
 `auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 是后备输入采样率；插件登录后会优先使用摄像头实际声明的编码和采样率。
+`ssl: true` 时插件会在 `ssl_port`（默认 8655）额外开一个 HTTPS 监听，用自签证书，浏览器只需确认一次就能用网页「按住说话」；`8654` 的明文 HTTP 保持不变，HA 侧边栏和 Scrypted 都不受影响。
 如果 RTSP 密码包含 `@`、`:`、`/` 等字符，需要在 RTSP URL 里做 URL 编码。
 
 ### 3. 启动容器
@@ -175,7 +178,7 @@ docker run -d \
   -p 8654:8654 \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.6
+  ghcr.io/wangling75/amd64-hikbridge:0.2.7
 ```
 
 查看日志：

@@ -70,6 +70,10 @@ cameras:
     channel: 1
 speak_sample_rate: 16000
 auth_token: ""
+ssl: false
+ssl_port: 8655
+certfile: ""
+keyfile: ""
 ```
 
 | Option | Meaning |
@@ -77,6 +81,16 @@ auth_token: ""
 | `cameras` | List of cameras, each with the fields above |
 | `speak_sample_rate` | Fallback input PCM rate; the camera-reported codec/rate takes precedence |
 | `auth_token` | Optional shared secret for the HTTP API and web UI |
+| `ssl` | Serve the UI over HTTPS with a self-signed certificate so the browser microphone works |
+| `ssl_port` | Port for the HTTPS listener, default `8655`; plain HTTP stays on `8654` |
+| `certfile` / `keyfile` | Optional certificate pair; generated under `/data/ssl` when empty |
+
+Browsers only expose `navigator.mediaDevices` on secure origins, so the web
+UI press-to-talk button cannot record over plain HTTP. Turn `ssl` on and open
+`https://<host>:8655/`, accept the self-signed certificate warning once, and
+the button starts working. The plain HTTP listener stays on `8654`, so the
+Home Assistant ingress panel plus the `speak` and `/talk` endpoints used by
+Scrypted keep working unchanged.
 
 The legacy single-camera keys (`camera_ip`, `camera_port`, `username`,
 `password`, `channel`) still work and are used when `cameras` is empty.

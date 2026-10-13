@@ -1,5 +1,5 @@
 name: "Hikvision PTZ Bridge"
-version: "0.2.6"
+version: "0.2.7"
 slug: "hikbridge"
 description: "PTZ control, snapshots, live two-way talk and speaker playback for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
 url: "https://github.com/wangling75/ha-hikbridge"
@@ -20,6 +20,13 @@ options:
   cameras: []
   speak_sample_rate: 16000
   auth_token: ""
+  # Serve the web UI over HTTPS with a self-signed certificate. Browsers
+  # only allow microphone capture on secure origins, so this is what makes
+  # the press-to-talk button work. The certificate is created on first start.
+  ssl: false
+  ssl_port: 8655
+  certfile: ""
+  keyfile: ""
   # Legacy single-camera keys, kept so existing installs keep validating.
   camera_ip: ""
   camera_port: 8000
@@ -38,6 +45,10 @@ schema:
       rtsp_url: str?
   speak_sample_rate: list(8000|16000)
   auth_token: str?
+  ssl: bool?
+  ssl_port: port?
+  certfile: str?
+  keyfile: str?
   camera_ip: str?
   camera_port: port?
   username: str?

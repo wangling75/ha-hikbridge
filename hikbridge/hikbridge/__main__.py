@@ -196,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--listen-port", type=int,
                         default=int(os.environ.get("HIK_LISTEN_PORT", 8654)))
     parser.add_argument("--token", default=os.environ.get("HIK_TOKEN"))
+    parser.add_argument("--ssl", action="store_true",
+                        default=os.environ.get("HIK_SSL", "").lower() in ("1", "true", "yes"))
+    parser.add_argument("--ssl-port", type=int,
+                        default=int(os.environ.get("HIK_SSL_PORT", 8655)))
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -214,6 +218,24 @@ def main(argv: list[str] | None = None) -> int:
 
     token = _clean(options.get("auth_token")) or args.token
 
+    # Browsers only allow microphone capture on secure origins, so HTTPS is
+    # what makes the web UI press-to-talk button work.
+    ssl_context = None
+    ssl_port = args.ssl_port
+    if bool(_clean(options.get("ssl"), False)) or args.ssl:
+        try:
+            ssl_port = int(_clean(options.get("ssl_port"), args.ssl_port))
+        except (TypeError, ValueError):
+            ssl_port = args.ssl_port
+        try:
+            from .tls import build_context
+            ssl_context = build_context(
+                _clean(options.get("certfile")), _clean(options.get("keyfile")),
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back to plain HTTP
+            _LOGGER.error("cannot enable HTTPS, staying on HTTP: %s", exc)
+            ssl_context = None
+
     for entry in cameras:
         _LOGGER.info("configured camera %s (%s) -> %s:%s channel %s",
                      entry.id, entry.name, entry.camera.ip, entry.camera.port,
@@ -226,7 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _shutdown)
 
     try:
-        serve(cameras, args.listen, args.listen_port, token)
+        serve(cameras, args.listen, args.listen_port, token, ssl_context,
+              ssl_port)
     except SystemExit:
         for entry in cameras:
             try:

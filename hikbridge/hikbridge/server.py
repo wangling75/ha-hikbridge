@@ -92,12 +92,16 @@ class CameraEntry:
 
 
 class _State:
-    def __init__(self, cameras: list[CameraEntry], token: str | None = None) -> None:
+    def __init__(self, cameras: list[CameraEntry], token: str | None = None,
+                 https_port: int | None = None) -> None:
         if not cameras:
             raise ValueError("at least one camera is required")
         self.cameras = list(cameras)
         self.by_id = {entry.id: entry for entry in self.cameras}
         self.token = token or None
+        # Advertised through /health so the web UI can point the user at the
+        # HTTPS origin when the microphone is blocked on plain HTTP.
+        self.https_port = https_port
 
     @property
     def default(self) -> CameraEntry:
@@ -197,6 +201,7 @@ def _handler(state: _State):
                         "version": __version__,
                         "timezone": os.environ.get("TZ") or time.tzname[0],
                         "timezone_status": hikbridge.timezone_status,
+                        "https_port": state.https_port,
                         "serial": default.camera.serial,
                         "device": default.camera.device,
                         "cameras": state.info_list(),
@@ -401,7 +406,8 @@ def _handler(state: _State):
 
 
 def serve(cameras: list[CameraEntry], host: str = "0.0.0.0", port: int = 8654,
-          token: str | None = None) -> None:
+          token: str | None = None, ssl_context=None,
+          ssl_port: int | None = None) -> None:
     for entry in cameras:
         try:
             entry.camera.login()
@@ -411,11 +417,33 @@ def serve(cameras: list[CameraEntry], host: str = "0.0.0.0", port: int = 8654,
             # request path retries the login before it uses the camera.
             _LOGGER.error("camera %s is not reachable yet: %s", entry.id, exc)
 
-    state = _State(cameras, token)
+    https_port: int | None = None
+    if ssl_context is not None:
+        try:
+            https_port = int(ssl_port or port + 1)
+        except (TypeError, ValueError):
+            https_port = port + 1
+
+    state = _State(cameras, token, https_port)
     httpd = ThreadingHTTPServer((host, port), _handler(state))
     httpd.daemon_threads = True
-    _LOGGER.info("hikbridge listening on %s:%s with %d camera(s)",
+    _LOGGER.info("hikbridge listening on http://%s:%s with %d camera(s)",
                  host, port, len(cameras))
+
+    if ssl_context is not None:
+        # Browsers only hand out microphone access on secure origins, so the
+        # HTTPS listener is what makes press-to-talk work. It deliberately
+        # runs on a second port: Supervisor's ingress and the HA/Scrypted
+        # HTTP clients keep talking plain HTTP to the first one.
+        httpsd = ThreadingHTTPServer((host, https_port), _handler(state))
+        httpsd.daemon_threads = True
+        httpsd.socket = ssl_context.wrap_socket(httpsd.socket, server_side=True)
+        threading.Thread(target=httpsd.serve_forever, name="hikbridge-https",
+                         daemon=True).start()
+        _LOGGER.info(
+            "hikbridge HTTPS listening on https://%s:%s (press-to-talk)",
+            host, https_port,
+        )
     try:
         httpd.serve_forever()
     finally:

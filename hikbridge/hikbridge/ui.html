@@ -223,6 +223,9 @@
   var step = 0.5;
   var busyUntil = 0;
   var snapTimer = null, snapRate = 2000, lastSnap = 0;
+  // Port of the optional HTTPS listener, reported by /health. Browsers need
+  // a secure origin before they hand out microphone access.
+  var httpsPort = null;
 
   function log(text, cls) {
     var row = document.createElement("div");
@@ -440,8 +443,10 @@
     showNotice(
       "浏览器只允许在安全来源（HTTPS 或 localhost）使用麦克风，当前是 " +
       "<code>" + location.origin + "</code>。<br>" +
-      "1）在 Chrome/Edge 地址栏打开 <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>，" +
-      "把本页地址填进去并设为 Enabled，重启浏览器；<br>" +
+      "1）在插件配置里把 <code>ssl</code> 打开并重启插件，改用 " +
+      "<code>https://" + location.hostname + ":" + (httpsPort || 8655) +
+      PATH_BASE + "/</code> 打开本页" +
+      "（自签证书浏览器会提示一次，选择继续访问），之后「按住说话」就能用；<br>" +
       "2）或者用「播放音频文件」把录音/文字转好的音频发到摄像头喇叭。"
     );
   }
@@ -687,6 +692,10 @@
     started = true;
     log("网桥 " + BASE);
     loadCameras();
+    fetch(withToken(BASE + "/health"))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (info) { if (info && info.https_port) httpsPort = info.https_port; })
+      .catch(function () {});
     setInterval(function () {
       api("/health").then(function () { setStatus(true, "已连接"); })
         .catch(function () { setStatus(false, "网桥无响应"); });
