@@ -56,6 +56,8 @@ function buildTalkFfmpegArgs(input: FFmpegInput, sampleRate: number): string[] {
         "-fflags", "nobuffer",
         "-flags", "low_delay",
         "-analyzeduration", "0",
+        "-probesize", "8192",
+        "-max_delay", "0",
     ];
     const inputArguments = input.inputArguments?.slice() || [];
 
@@ -420,7 +422,7 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
             if (this.intercomState !== state || ws.readyState !== WebSocket.OPEN)
                 return;
             // Never let a slow bridge turn talkback into a growing delay.
-            if (ws.bufferedAmount > 32 * 1024) {
+            if (ws.bufferedAmount > 8 * 1024) {
                 if (!backlogDropped) {
                     this.console.warn("dropping stale talkback audio; bridge is behind");
                     backlogDropped = true;

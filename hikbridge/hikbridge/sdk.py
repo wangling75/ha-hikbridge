@@ -117,6 +117,11 @@ class _VoiceEncoder:
             output = [
                 "-c:a", "aac",
                 "-b:a", "32k",
+                # The AAC encoder's default frame is 1024 samples (64 ms at
+                # 16 kHz). Interactive talkback uses 20 ms frames; the camera
+                # accepts these ADTS frames and the shorter lookahead removes
+                # most of the encoder-side delay.
+                "-frame_duration", "20",
                 "-ar", str(target_rate),
                 "-ac", "1",
                 "-f", "adts",

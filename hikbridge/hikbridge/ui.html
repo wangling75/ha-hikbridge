@@ -618,7 +618,7 @@
   // ---- 喊话 ----
   var talk = { ws: null, ctx: null, stream: null, node: null, sink: null, live: false, mode: "" };
 
-  // AudioWorklet 以 128 帧为处理单位；这里聚合成约 16ms 一块，既避开
+  // AudioWorklet 以 128 帧为处理单位；这里聚合成约 20ms 一块，既避开
   // ScriptProcessor 的 64ms 缓冲，也不会让 WebSocket 每秒发上百个包。
   var TALK_WORKLET_SOURCE = [
     "class HikBridgeTalkProcessor extends AudioWorkletProcessor {",
@@ -733,7 +733,8 @@
         numberOfOutputs: 1,
         outputChannelCount: [1],
         processorOptions: {
-          chunkSize: Math.max(128, Math.round(ctx.sampleRate * 0.016))
+          // Align the microphone chunk with the camera's 20 ms AAC frames.
+          chunkSize: Math.max(128, Math.round(ctx.sampleRate * 0.020))
         }
       });
       node.port.onmessage = function (ev) { onChunk(ev.data); };
@@ -751,7 +752,7 @@
     if (!talk.live || !talk.ws || talk.ws.readyState !== 1) return;
     // If the camera or the bridge is behind, drop stale microphone data
     // instead of building an ever-growing audio delay.
-    if (talk.ws.bufferedAmount > 8192) return;
+    if (talk.ws.bufferedAmount > 4096) return;
     var pcm = floatToPcm16(resample ? resample(input) : input);
     try { talk.ws.send(pcm.buffer); } catch (e) {}
   }
@@ -768,9 +769,12 @@
         channelCount: 1,
         sampleRate: 16000,
         latency: 0,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
+        // Push-to-talk goes to a camera speaker, not back to the local
+        // WebAudio output.  Disabling browser DSP avoids the extra capture
+        // buffer that echo cancellation inserts on many platforms.
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
       }
     }).then(function (stream) {
       talk.stream = stream;
