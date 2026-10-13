@@ -231,6 +231,7 @@ def _handler(state: _State):
                 return
             try:
                 if action in ("ptz", "ptz/start"):
+                    self._ready(entry)
                     payload = json.loads(body or b"{}")
                     direction = str(payload.get("direction", ""))
                     if direction not in PTZ_COMMANDS:
@@ -249,10 +250,12 @@ def _handler(state: _State):
                         "direction": direction, "duration": duration,
                     })
                 elif action == "ptz/stop":
+                    self._ready(entry)
                     with entry.lock:
                         ok = entry.camera.stop()
                     self._json(200, {"ok": bool(ok), "camera": entry.id})
                 elif action in ("speak", "speak_raw"):
+                    self._ready(entry)
                     if not body:
                         self._json(400, {"ok": False, "error": "empty body"})
                         return
@@ -278,6 +281,13 @@ def _handler(state: _State):
                 self._json(400, {"ok": False, "error": str(exc)})
 
         # -- individual endpoints -----------------------------------------
+        def _ready(self, entry: CameraEntry) -> None:
+            """Reconnect a camera that was offline when the add-on started."""
+            camera = entry.camera
+            if getattr(camera, "uid", 0) >= 0:
+                return
+            camera.login()
+
         def _login(self, body: bytes) -> None:
             """Password check used by the web UI login form."""
             if not state.token:
@@ -295,6 +305,7 @@ def _handler(state: _State):
             self._json(401, {"ok": False, "error": "wrong password"})
 
         def _snapshot(self, entry: CameraEntry, query: dict) -> None:
+            self._ready(entry)
             with entry.lock:
                 with tempfile.TemporaryDirectory() as tmp:
                     target = os.path.join(tmp, "snap.jpg")
@@ -339,6 +350,7 @@ def _handler(state: _State):
             rate = entry.camera.speak_sample_rate
             frames = 0
             try:
+                self._ready(entry)
                 entry.camera.talk_start()
                 ws.send_text(json.dumps({"ok": True, "camera": entry.id, "rate": rate}))
                 while True:
@@ -382,8 +394,13 @@ def _handler(state: _State):
 def serve(cameras: list[CameraEntry], host: str = "0.0.0.0", port: int = 8654,
           token: str | None = None) -> None:
     for entry in cameras:
-        entry.camera.login()
-        _LOGGER.info("camera %s ready (%s)", entry.id, entry.camera.serial)
+        try:
+            entry.camera.login()
+            _LOGGER.info("camera %s ready (%s)", entry.id, entry.camera.serial)
+        except HikError as exc:
+            # One unreachable camera must not take the whole bridge down. The
+            # request path retries the login before it uses the camera.
+            _LOGGER.error("camera %s is not reachable yet: %s", entry.id, exc)
 
     state = _State(cameras, token)
     httpd = ThreadingHTTPServer((host, port), _handler(state))
