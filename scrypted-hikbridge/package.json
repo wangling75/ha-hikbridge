@@ -57,6 +57,7 @@
   "devDependencies": {
     "@types/node": "^22.20.2",
     "@types/ws": "^8.18.1",
+    "rollup": "^4.64.5",
     "terser-webpack-plugin": "^5.6.1",
     "typescript": "^5.9.3"
   }
