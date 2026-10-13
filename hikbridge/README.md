@@ -14,6 +14,8 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
 * PTZ nudge/stop for every configured camera
 * JPEG snapshots straight from the SDK (also used by the HA camera entity)
 * Speaker playback: WAV/PCM pushed to the camera speaker (`/speak`)
+  - the add-on reads the camera's intercom codec after login and encodes
+    AAC/G.711 automatically (the tested 207 camera uses AAC/16 kHz)
 * Live two-way talk over a WebSocket (`/talk`) - the built-in web UI streams
   the browser microphone, or an audio file, straight to the camera speaker
 * Built-in web UI at `http://<ha-host>:8654/` with camera tabs, snapshot
@@ -73,7 +75,7 @@ auth_token: ""
 | Option | Meaning |
 | --- | --- |
 | `cameras` | List of cameras, each with the fields above |
-| `speak_sample_rate` | PCM rate pushed to the speaker, `8000` or `16000` |
+| `speak_sample_rate` | Fallback input PCM rate; the camera-reported codec/rate takes precedence |
 | `auth_token` | Optional shared secret for the HTTP API and web UI |
 
 The legacy single-camera keys (`camera_ip`, `camera_port`, `username`,
@@ -90,7 +92,7 @@ POST /api/cameras/<id>/ptz                {"direction": "right", "duration": 0.6
 POST /api/cameras/<id>/ptz/start          {"direction": "right"}
 POST /api/cameras/<id>/ptz/stop
 POST /api/cameras/<id>/speak              body = WAV file
-POST /api/cameras/<id>/speak_raw?rate=8000  body = raw PCM
+POST /api/cameras/<id>/speak_raw?rate=8000  body = raw PCM16, encoded for the camera
 GET  /api/cameras/<id>/talk               WebSocket: PCM16 mono in, live talk
 ```
 

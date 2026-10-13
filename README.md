@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.5
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.6
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.5
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.5 ./hikbridge
+docker build -t hikbridge:0.2.6 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -163,7 +163,7 @@ cp options.example.json options.json
 }
 ```
 
-`auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 可选 `8000` 或 `16000`。
+`auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 是后备输入采样率；插件登录后会优先使用摄像头实际声明的编码和采样率。
 如果 RTSP 密码包含 `@`、`:`、`/` 等字符，需要在 RTSP URL 里做 URL 编码。
 
 ### 3. 启动容器
@@ -175,7 +175,7 @@ docker run -d \
   -p 8654:8654 \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.5
+  ghcr.io/wangling75/amd64-hikbridge:0.2.6
 ```
 
 查看日志：
@@ -292,7 +292,9 @@ data:
 
 `hikbridge.speak` 的实现路径：HA 的 TTS 实体生成音频 → 集成把 WAV 解码成
 16-bit 单声道 PCM 并按摄像头要求的采样率重采样 → POST 给插件 → 插件用
-`NET_DVR_VoiceComSendData` 推给摄像头喇叭。
+`NET_DVR_VoiceComSendData` 推给摄像头喇叭。插件登录后会查询摄像头声明的
+对讲编码；207 实测为 AAC/16 kHz，插件会自动用内置 ffmpeg 编成 ADTS 单帧，
+不再把 PCM 直接塞进只接受 AAC 的通道。
 
 > TTS 引擎如果不是输出 WAV（比如 Google Translate 输出 MP3），集成会尝试
 > 调用 `ffmpeg` 转码；HAOS 的 Core 容器默认没有 ffmpeg，所以建议用
@@ -320,7 +322,7 @@ GET  /snapshot.jpg
 POST /ptz                    {"direction": "right", "duration": 0.6}
 POST /ptz/stop
 POST /speak                  body = WAV file
-POST /speak_raw?rate=8000    body = raw PCM, forwarded verbatim
+POST /speak_raw?rate=8000    body = raw PCM16, encoded for the camera
 ```
 
 ## 这台摄像头实测能力

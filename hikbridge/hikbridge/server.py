@@ -11,7 +11,7 @@ several cameras at once:
   POST /api/cameras/<id>/ptz/start       {"direction": "right"}
   POST /api/cameras/<id>/ptz/stop
   POST /api/cameras/<id>/speak           -> body is a WAV file
-  POST /api/cameras/<id>/speak_raw?rate= -> body is forwarded verbatim
+  POST /api/cameras/<id>/speak_raw?rate= -> body is PCM16 mono; encoded for the camera
   GET  /api/cameras/<id>/talk            -> WebSocket, live two-way audio
 
 The original single-camera paths (/ptz, /ptz/stop, /snapshot.jpg, /speak,
@@ -86,6 +86,8 @@ class CameraEntry:
             "name": self.name,
             "serial": self.camera.serial,
             "device": self.camera.device,
+            "audio_codec": self.camera.audio_codec,
+            "audio_rate": self.camera.audio_rate,
         }
 
 
@@ -270,10 +272,13 @@ def _handler(state: _State):
                         })
                         return
                     if action == "speak":
-                        pcm = prepare_wav(body, entry.camera.speak_sample_rate)
+                        speak_rate = entry.camera.audio_rate or entry.camera.speak_sample_rate
+                        pcm = prepare_wav(body, speak_rate)
                     else:
                         pcm = body
-                    rate = int(query.get("rate", [entry.camera.speak_sample_rate])[0])
+                    # speak_raw is also PCM16; HikCamera encodes it to the
+                    # codec advertised by the camera before sending it.
+                    rate = int(query.get("rate", [entry.camera.audio_rate or entry.camera.speak_sample_rate])[0])
                     with entry.lock:
                         sent = entry.camera.speak(pcm, rate)
                     self._json(200, {"ok": True, "camera": entry.id, "bytes": sent})
@@ -351,12 +356,12 @@ def _handler(state: _State):
             except OSError:
                 pass
 
-            rate = entry.camera.speak_sample_rate
+            rate = entry.camera.audio_rate or entry.camera.speak_sample_rate
             frames = 0
             try:
                 self._ready(entry)
                 entry.camera.talk_start()
-                ws.send_text(json.dumps({"ok": True, "camera": entry.id, "rate": rate}))
+                ws.send_text(json.dumps({"ok": True, "camera": entry.id, "rate": rate, "codec": entry.camera.audio_codec}))
                 while True:
                     opcode, payload = ws.recv()
                     if opcode == OP_TEXT:

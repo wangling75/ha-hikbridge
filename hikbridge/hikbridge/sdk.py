@@ -14,14 +14,23 @@ Facts established by probing that device:
   HCNetSDKCom directory while the voice channel is opened
 * openal needs an audio device; an ALSA "null" device (see asound.conf) is
   enough, which keeps this usable inside a container with no sound card
+* the camera advertises the intercom codec after login.  The OEM camera here
+  advertises AAC/16 kHz, and the voice channel rejects raw PCM by playing its
+  local "invalid format" beep.  AAC has to be sent as complete ADTS frames.
 """
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
+import select
+import shutil
+import subprocess
 import threading
 import time
 from contextlib import contextmanager
+
+_LOGGER = logging.getLogger("hikbridge")
 
 # Codes 25..28 (diagonals), 29/30 (auto pan) and the zoom/focus/iris block all
 # return err 11 on this device, so only the four cardinal moves are exposed.
@@ -32,8 +41,12 @@ PTZ_COMMANDS = {
     "right": 24,
 }
 
-# Maximum chunk accepted by NET_DVR_VoiceComSendData (8000 was rejected).
+# NET_DVR_VoiceComSendData accepts small encoded frames.  G.711 is always
+# 160 bytes; AAC ADTS frames from ffmpeg are normally under 512 bytes.
 VOICE_CHUNK = 1600
+
+# byAudioSamplingRate from NET_DVR_AUDIO_COMPRESS.
+_AUDIO_RATE_TABLE = (16000, 16000, 32000, 48000, 44100, 8000)
 
 # The SDK's intercom plugin resolves its sibling libraries through the cwd.
 _chdir_lock = threading.Lock()
@@ -58,6 +71,16 @@ class _JPEGPara(ctypes.Structure):
     _fields_ = [("wPicSize", ctypes.c_uint16), ("wPicQuality", ctypes.c_uint16)]
 
 
+class _AudioComp(ctypes.Structure):
+    _fields_ = [
+        ("byAudioEncType", ctypes.c_ubyte),
+        ("byAudioSamplingRate", ctypes.c_ubyte),
+        ("byAudioBitRate", ctypes.c_ubyte),
+        ("byres", ctypes.c_ubyte * 4),
+        ("bySupport", ctypes.c_ubyte),
+    ]
+
+
 _VOICE_CB = ctypes.CFUNCTYPE(
     None, ctypes.c_int32, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_ubyte, ctypes.c_void_p
 )
@@ -65,6 +88,176 @@ _VOICE_CB = ctypes.CFUNCTYPE(
 
 class HikError(RuntimeError):
     pass
+
+
+class _VoiceEncoder:
+    """Encode PCM16 mono into the codec announced by the camera.
+
+    HCNetSDK's MR voice channel wants encoded frames, not PCM.  ffmpeg is the
+    smallest reliable way to handle both AAC ADTS and G.711 without pulling a
+    large audio dependency into the add-on.
+    """
+
+    def __init__(
+        self,
+        codec: str,
+        target_rate: int,
+        input_rate: int,
+        ffmpeg: str = "ffmpeg",
+    ) -> None:
+        self.codec = codec
+        self.target_rate = target_rate
+        self.input_rate = input_rate
+        self._buffer = b""
+        self._eof = False
+        self._input_closed = False
+        self._proc: subprocess.Popen | None = None
+
+        if codec == "aac":
+            output = [
+                "-c:a", "aac",
+                "-b:a", "32k",
+                "-ar", str(target_rate),
+                "-ac", "1",
+                "-f", "adts",
+            ]
+        elif codec == "g711u":
+            output = [
+                "-c:a", "pcm_mulaw",
+                "-ar", "8000",
+                "-ac", "1",
+                "-f", "mulaw",
+            ]
+        elif codec == "g711a":
+            output = [
+                "-c:a", "pcm_alaw",
+                "-ar", "8000",
+                "-ac", "1",
+                "-f", "alaw",
+            ]
+        else:
+            raise HikError(f"unsupported voice codec {codec!r}")
+
+        if not shutil.which(ffmpeg):
+            raise HikError(f"ffmpeg is not installed ({ffmpeg})")
+
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-f", "s16le",
+            "-ar", str(input_rate),
+            "-ac", "1",
+            "-i", "pipe:0",
+            *output,
+            "-flush_packets", "1",
+            "pipe:1",
+        ]
+        self._proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    @property
+    def eof(self) -> bool:
+        return self._eof
+
+    def write(self, pcm: bytes) -> None:
+        if self._proc is None or self._proc.stdin is None:
+            raise HikError("voice encoder is not running")
+        if self._input_closed:
+            raise HikError("voice encoder input is already closed")
+        # PCM16 samples are two bytes; an odd trailing byte is not a sample.
+        pcm = pcm[: len(pcm) // 2 * 2]
+        if not pcm:
+            return
+        try:
+            self._proc.stdin.write(pcm)
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            raise HikError(f"voice encoder stopped: {exc}") from exc
+
+    def close_input(self) -> None:
+        if self._input_closed:
+            return
+        self._input_closed = True
+        if self._proc is not None and self._proc.stdin is not None:
+            try:
+                self._proc.stdin.close()
+            except OSError:
+                pass
+
+    def read_frames(self, timeout: float = 0.0) -> list[bytes]:
+        """Return complete encoded frames currently available."""
+        if self._proc is None or self._proc.stdout is None:
+            return []
+
+        if timeout > 0:
+            try:
+                ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+            except (OSError, ValueError):
+                ready = []
+        else:
+            ready = [self._proc.stdout]
+
+        if ready:
+            try:
+                data = os.read(self._proc.stdout.fileno(), 8192)
+            except (BlockingIOError, OSError):
+                data = b""
+            if data:
+                self._buffer += data
+            else:
+                self._eof = True
+
+        return self._split_frames()
+
+    def _split_frames(self) -> list[bytes]:
+        frames: list[bytes] = []
+        if self.codec == "aac":
+            while len(self._buffer) >= 7:
+                if self._buffer[0] != 0xFF or self._buffer[1] & 0xF0 != 0xF0:
+                    sync = self._buffer.find(b"\xff", 1)
+                    if sync < 0:
+                        self._buffer = b""
+                        break
+                    self._buffer = self._buffer[sync:]
+                    continue
+                length = (
+                    ((self._buffer[3] & 0x03) << 11)
+                    | (self._buffer[4] << 3)
+                    | (self._buffer[5] >> 5)
+                )
+                if length < 7:
+                    self._buffer = self._buffer[1:]
+                    continue
+                if len(self._buffer) < length:
+                    break
+                frames.append(self._buffer[:length])
+                self._buffer = self._buffer[length:]
+        else:
+            # G.711 is a continuous 8 kHz byte stream: one frame is 20 ms.
+            while len(self._buffer) >= 160:
+                frames.append(self._buffer[:160])
+                self._buffer = self._buffer[160:]
+        return frames
+
+    def wait(self, timeout: float = 2.0) -> None:
+        if self._proc is None:
+            return
+        try:
+            self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
+
+    def close(self) -> None:
+        if self._proc is None:
+            return
+        self.close_input()
+        self.wait()
 
 
 class HikCamera:
@@ -92,6 +285,9 @@ class HikCamera:
         self.password = password
         self.channel = channel
         self.speak_sample_rate = speak_sample_rate
+        self.audio_rate = speak_sample_rate
+        self.audio_codec: str | None = None
+        self.audio_enc_type: int | None = None
         self.sdk_dir = sdk_dir or os.path.join(os.path.dirname(__file__), "hcnetsdk")
         self.com_dir = os.path.join(self.sdk_dir, "HCNetSDKCom")
         self.uid = -1
@@ -99,6 +295,7 @@ class HikCamera:
         self._lock = threading.RLock()
         self._voice_handle = -1
         self._voice_cb = _VOICE_CB(self._on_voice_data)
+        self._encoder: _VoiceEncoder | None = None
         self._received = 0
         self._sdk = None
         self._load()
@@ -146,18 +343,84 @@ class HikCamera:
         s.NET_DVR_CaptureJPEGPicture.argtypes = [
             ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(_JPEGPara), ctypes.c_char_p,
         ]
-        s.NET_DVR_StartVoiceCom_V30.restype = ctypes.c_int32
-        s.NET_DVR_StartVoiceCom_V30.argtypes = [
-            ctypes.c_int32, ctypes.c_uint32, ctypes.c_bool, _VOICE_CB, ctypes.c_void_p,
-        ]
+
+        # Newer SDKs expose the codec query and the MR voice API.  The MR API
+        # is the one that accepts encoded intercom frames; the old V30 API is
+        # kept only as a compatibility fallback.
+        self._get_audio_compress = getattr(
+            s, "NET_DVR_GetCurrentAudioCompress", None
+        )
+        if self._get_audio_compress is not None:
+            self._get_audio_compress.restype = ctypes.c_bool
+            self._get_audio_compress.argtypes = [
+                ctypes.c_int32, ctypes.POINTER(_AudioComp)
+            ]
+        self._start_voice_mr = getattr(s, "NET_DVR_StartVoiceCom_MR_V30", None)
+        if self._start_voice_mr is not None:
+            self._start_voice_mr.restype = ctypes.c_int32
+            self._start_voice_mr.argtypes = [
+                ctypes.c_int32, ctypes.c_uint32, _VOICE_CB, ctypes.c_void_p
+            ]
+        self._start_voice_legacy = getattr(s, "NET_DVR_StartVoiceCom_V30", None)
+        if self._start_voice_legacy is not None:
+            self._start_voice_legacy.restype = ctypes.c_int32
+            self._start_voice_legacy.argtypes = [
+                ctypes.c_int32, ctypes.c_uint32, ctypes.c_bool, _VOICE_CB,
+                ctypes.c_void_p,
+            ]
+
         s.NET_DVR_StopVoiceCom.restype = ctypes.c_bool
         s.NET_DVR_StopVoiceCom.argtypes = [ctypes.c_int32]
         s.NET_DVR_VoiceComSendData.restype = ctypes.c_bool
-        s.NET_DVR_VoiceComSendData.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_uint32]
+        s.NET_DVR_VoiceComSendData.argtypes = [
+            ctypes.c_int32, ctypes.c_char_p, ctypes.c_uint32
+        ]
 
     # -- session -----------------------------------------------------------
     def _on_voice_data(self, handle, buf, size, flag, user) -> None:
         self._received += size
+
+    def _read_audio_compression(self) -> None:
+        """Read the camera's advertised intercom codec after login."""
+        if self._get_audio_compress is None:
+            _LOGGER.warning(
+                "camera %s: SDK has no NET_DVR_GetCurrentAudioCompress; "
+                "speaker playback cannot select the right codec", self.ip
+            )
+            return
+        info = _AudioComp()
+        if not self._get_audio_compress(self.uid, ctypes.byref(info)):
+            _LOGGER.warning(
+                "camera %s: cannot query intercom codec (SDK error %s)",
+                self.ip, self.last_error(),
+            )
+            return
+
+        enc = int(info.byAudioEncType)
+        rate_index = int(info.byAudioSamplingRate)
+        rate = _AUDIO_RATE_TABLE[rate_index] if rate_index < len(_AUDIO_RATE_TABLE) else 16000
+        codec = {
+            1: "g711u",
+            2: "g711a",
+            7: "aac",
+            12: "aac",
+        }.get(enc)
+        if codec is None:
+            _LOGGER.warning(
+                "camera %s: unsupported intercom codec %s (sample-rate index %s)",
+                self.ip, enc, rate_index,
+            )
+            return
+        if codec != "aac":
+            # G.711 voice intercom is always the 8 kHz, 20 ms format.
+            rate = 8000
+        self.audio_enc_type = enc
+        self.audio_codec = codec
+        self.audio_rate = rate
+        _LOGGER.info(
+            "camera %s: intercom codec=%s rate=%s Hz",
+            self.ip, codec, rate,
+        )
 
     def login(self) -> None:
         with self._lock:
@@ -189,6 +452,7 @@ class HikCamera:
                 "byStartChan": raw[54],
                 "byZeroChanNum": raw[57],
             }
+            self._read_audio_compression()
 
     def close(self) -> None:
         with self._lock:
@@ -240,50 +504,142 @@ class HikCamera:
         return path
 
     # -- voice (TTS to the camera speaker, and device mic back to us) -------
+    def _ensure_encoder(self, input_rate: int) -> None:
+        if self.audio_codec is None:
+            # A camera may have come online before the codec query succeeded.
+            self._read_audio_compression()
+        if self.audio_codec is None:
+            raise HikError(
+                "camera did not report a supported intercom codec; "
+                "speaker playback is unavailable"
+            )
+        if self._encoder is not None and self._encoder.input_rate == input_rate:
+            return
+        self._close_encoder()
+        self._encoder = _VoiceEncoder(
+            self.audio_codec, self.audio_rate, input_rate
+        )
+
+    def _send_encoded(self, frames: list[bytes]) -> None:
+        if self._voice_handle < 0:
+            raise HikError("voice channel is not open")
+        for frame in frames:
+            if not frame:
+                continue
+            if len(frame) > VOICE_CHUNK:
+                # This should not happen for AAC ADTS or 20 ms G.711, but
+                # never corrupt a codec frame by blindly splitting it.
+                raise HikError(
+                    f"encoded voice frame is too large ({len(frame)} bytes)"
+                )
+            if not self._sdk.NET_DVR_VoiceComSendData(
+                self._voice_handle, frame, len(frame)
+            ):
+                raise HikError(
+                    f"VoiceComSendData failed ({self.last_error()})"
+                )
+
+    def _read_encoded(self, timeout: float = 0.0) -> None:
+        if self._encoder is not None:
+            self._send_encoded(self._encoder.read_frames(timeout))
+
+    def _finish_encoder(self) -> None:
+        """Flush the encoder, sending every complete frame before closing."""
+        encoder = self._encoder
+        if encoder is None:
+            return
+        encoder.close_input()
+        deadline = time.monotonic() + 3.0
+        while True:
+            frames = encoder.read_frames(0.05)
+            if frames:
+                self._send_encoded(frames)
+                continue
+            if encoder.eof:
+                break
+            if time.monotonic() >= deadline:
+                break
+        encoder.wait()
+        self._encoder = None
+
+    def _close_encoder(self) -> None:
+        encoder, self._encoder = self._encoder, None
+        if encoder is not None:
+            encoder.close()
+
     def talk_start(self) -> int:
         with self._lock:
             if self._voice_handle >= 0:
                 return self._voice_handle
-            # bNeedAudio=False: we push audio ourselves instead of letting the
-            # SDK capture from a local microphone.
+            # The MR variant accepts encoded frames and is the API used by
+            # Hikvision's own talk clients.  bNeedAudio is not a parameter
+            # here: the callback still receives the camera microphone stream.
             with _working_dir(self.com_dir):
-                self._voice_handle = self._sdk.NET_DVR_StartVoiceCom_V30(
-                    self.uid, self.channel, False, self._voice_cb, None
-                )
+                if self._start_voice_mr is not None:
+                    self._voice_handle = self._start_voice_mr(
+                        self.uid, self.channel, self._voice_cb, None
+                    )
+                elif self._start_voice_legacy is not None:
+                    self._voice_handle = self._start_voice_legacy(
+                        self.uid, self.channel, False, self._voice_cb, None
+                    )
+                else:
+                    raise HikError("SDK has no voice-com API")
             if self._voice_handle < 0:
                 raise HikError(f"StartVoiceCom failed ({self.last_error()})")
             return self._voice_handle
 
     def talk_send(self, pcm: bytes, rate: int | None = None) -> int:
+        """Encode PCM16 mono and push it to the camera speaker.
+
+        ``pcm`` is the format used by the browser/TTS caller.  ``rate`` is its
+        sample rate; the camera's advertised rate and codec are handled here.
+        """
+        if not pcm:
+            return 0
+        rate = int(rate or self.audio_rate or self.speak_sample_rate)
+        if rate <= 0:
+            raise HikError(f"invalid PCM sample rate {rate!r}")
         with self._lock:
             if self._voice_handle < 0:
                 raise HikError("voice channel is not open")
-            rate = rate or self.speak_sample_rate
-            sent = 0
-            for offset in range(0, len(pcm), VOICE_CHUNK):
-                chunk = pcm[offset:offset + VOICE_CHUNK]
-                if not self._sdk.NET_DVR_VoiceComSendData(
-                    self._voice_handle, chunk, len(chunk)
-                ):
-                    raise HikError(
-                        f"VoiceComSendData failed at {offset} ({self.last_error()})"
-                    )
-                sent += len(chunk)
-                # pace the stream so the device buffer does not overflow
-                time.sleep(len(chunk) / 2.0 / rate)
+            self._ensure_encoder(rate)
+            assert self._encoder is not None
+            self._encoder.write(pcm)
+            # Read whatever ffmpeg has produced already.  This keeps a long
+            # TTS clip from filling the encoder stdout pipe while we pace it.
+            self._read_encoded(0.01)
+            sent = len(pcm)
+            # Pace the caller so the camera receives roughly real-time audio.
+            time.sleep(sent / 2.0 / rate)
             return sent
 
     def talk_stop(self) -> None:
         with self._lock:
+            try:
+                self._finish_encoder()
+            except HikError as exc:
+                _LOGGER.warning("could not flush voice encoder: %s", exc)
+                self._close_encoder()
             if self._voice_handle >= 0:
                 self._sdk.NET_DVR_StopVoiceCom(self._voice_handle)
                 self._voice_handle = -1
 
     def speak(self, pcm: bytes, rate: int | None = None) -> int:
         """Push 16-bit mono PCM to the camera speaker."""
+        if not pcm:
+            return 0
+        rate = int(rate or self.audio_rate or self.speak_sample_rate)
+        # Feed in 100 ms chunks so ffmpeg's stdout cannot fill while the
+        # caller is sleeping for real-time pacing.
+        chunk_samples = max(1, int(rate * 0.1))
+        chunk_bytes = chunk_samples * 2
         with self._lock:
             self.talk_start()
             try:
-                return self.talk_send(pcm, rate)
+                sent = 0
+                for offset in range(0, len(pcm), chunk_bytes):
+                    sent += self.talk_send(pcm[offset:offset + chunk_bytes], rate)
+                return sent
             finally:
                 self.talk_stop()
