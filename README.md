@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.8
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.9
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.8
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.8 ./hikbridge
+docker build -t hikbridge:0.2.9 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -166,7 +166,7 @@ cp options.example.json options.json
 ```
 
 `auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 是后备输入采样率；插件登录后会优先使用摄像头实际声明的编码和采样率。
-`ssl: true` 时插件会在 `ssl_port`（默认 8655）额外开一个 HTTPS 监听，用自签证书，浏览器只需确认一次就能用网页「点击开始喊话」；`8654` 的明文 HTTP 保持不变，HA 侧边栏和 Scrypted 都不受影响。网页实时画面通过 `/live.mp4` 把 RTSP 视频和音频转给浏览器，点击「开启声音」即可听到摄像头麦克风。
+`ssl: true` 时插件会在 `ssl_port`（默认 8655）额外开一个 HTTPS 监听，用自签证书，浏览器只需确认一次就能用网页「点击开始喊话」；`8654` 的明文 HTTP 保持不变，HA 侧边栏和 Scrypted 都不受影响。网页实时画面通过 `/live.mp4` 把 RTSP 视频和音频转给浏览器；点击「实时画面」时会优先直接带声音播放，浏览器若拦截自动播放则自动静音，并可用「开启声音」恢复。
 如果 RTSP 密码包含 `@`、`:`、`/` 等字符，需要在 RTSP URL 里做 URL 编码。
 
 ### 3. 启动容器
@@ -178,7 +178,7 @@ docker run -d \
   -p 8654:8654 \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.8
+  ghcr.io/wangling75/amd64-hikbridge:0.2.9
 ```
 
 查看日志：

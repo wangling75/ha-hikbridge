@@ -505,7 +505,20 @@
     live.muted = true;
     liveState.active = true;
     setLiveUi(true);
-    live.play().catch(function () {});
+    // 实时画面按钮本身就是用户手势，优先直接带声音播放。若浏览器
+    // 仍拦截自动播放，再退回静音并保留“开启声音”按钮。
+    live.muted = false;
+    live.volume = 1;
+    soundToggle.textContent = "正在开启声音…";
+    live.play().then(function () {
+      soundToggle.textContent = "声音已开启";
+      soundToggle.disabled = true;
+    }).catch(function () {
+      live.muted = true;
+      soundToggle.textContent = "开启声音";
+      soundToggle.disabled = false;
+      live.play().catch(function () {});
+    });
     source.addEventListener("sourceopen", function () {
       var mime = liveMime();
       if (!mime) { failLive(new Error("浏览器不支持 MP4/AAC")); return; }
