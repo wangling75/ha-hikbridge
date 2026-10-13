@@ -7,6 +7,7 @@ several cameras at once:
   GET  /health                           -> {"ok": true, "cameras": [...]}
   GET  /api/cameras                      -> {"ok": true, "cameras": [...]}
   GET  /api/cameras/<id>/snapshot.jpg    -> image/jpeg (?download=1 saves it)
+  GET  /api/cameras/<id>/live.mp4        -> fragmented MP4 (video + AAC) for the web UI
   POST /api/cameras/<id>/ptz             {"direction": "right", "duration": 0.6}
   POST /api/cameras/<id>/ptz/start       {"direction": "right"}
   POST /api/cameras/<id>/ptz/stop
@@ -28,6 +29,8 @@ import json
 import logging
 import os
 import secrets
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -77,6 +80,7 @@ class CameraEntry:
     id: str
     name: str
     camera: HikCamera
+    rtsp_url: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     talking: bool = False
 
@@ -88,6 +92,7 @@ class CameraEntry:
             "device": self.camera.device,
             "audio_codec": self.camera.audio_codec,
             "audio_rate": self.camera.audio_rate,
+            "live": bool(self.rtsp_url),
         }
 
 
@@ -218,6 +223,9 @@ def _handler(state: _State):
                 if action in ("snapshot", "snapshot.jpg"):
                     self._snapshot(entry, query)
                     return
+                if action in ("live", "live.mp4"):
+                    self._live(entry)
+                    return
                 if action == "talk":
                     self._talk(entry)
                     return
@@ -334,6 +342,84 @@ def _handler(state: _State):
                     f'attachment; filename="{entry.id}-{stamp}.jpg"'
                 )
             self._send(200, data, "image/jpeg", extra)
+
+        def _live(self, entry: CameraEntry) -> None:
+            """Stream RTSP to the browser as fragmented MP4.
+
+            The browser cannot play RTSP directly. ffmpeg scales the video to
+            720p and converts any camera audio to AAC, which MSE can append as
+            it arrives. The HTTP response is chunked so playback starts before
+            the live stream has finished.
+            """
+            if not entry.rtsp_url:
+                self._json(409, {"ok": False, "error": "camera has no rtsp_url configured"})
+                return
+            if not shutil.which("ffmpeg"):
+                self._json(501, {"ok": False, "error": "ffmpeg is not installed"})
+                return
+
+            # Some Hikvision cameras send absolute RTP timestamps for audio.
+            # Reset both streams to zero so fragmented MP4 stays in range and
+            # the browser keeps the audio track alive.
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "warning",
+                "-rtsp_transport", "tcp", "-i", entry.rtsp_url,
+                "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                "-pix_fmt", "yuv420p", "-s", "1280x720",
+                "-r", "22", "-g", "22", "-keyint_min", "22",
+                "-sc_threshold", "0",
+                "-b:v", "1800k", "-maxrate", "2200k", "-bufsize", "3600k",
+                "-c:a", "aac", "-b:a", "96k",
+                "-ar", "48000", "-ac", "1",
+                "-af",
+                "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0:min_hard_comp=0.1",
+                "-vsync", "cfr", "-avoid_negative_ts", "make_zero",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-flush_packets", "1", "-f", "mp4", "pipe:1",
+            ]
+            proc = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            if proc.stderr is not None:
+                def _drain_stderr() -> None:
+                    for line in iter(proc.stderr.readline, b""):
+                        text = line.decode("utf-8", "replace").strip()
+                        if text:
+                            _LOGGER.debug("live ffmpeg: %s", text)
+                threading.Thread(
+                    target=_drain_stderr, name="hikbridge-live-ffmpeg", daemon=True
+                ).start()
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                assert proc.stdout is not None
+                while True:
+                    chunk = os.read(proc.stdout.fileno(), 16384)
+                    if not chunk:
+                        break
+                    self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+                    self.wfile.write(chunk)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    proc.kill()
+                try:
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                except OSError:
+                    pass
 
         def _talk(self, entry: CameraEntry) -> None:
             """Live push-to-talk: browser streams PCM16 mono over a WebSocket."""

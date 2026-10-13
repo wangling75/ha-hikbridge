@@ -126,6 +126,7 @@ def _camera_entry(spec: dict, index: int, sdk_dir: str | None,
         id=str(_clean(spec.get("id"), "") or f"cam{index + 1}"),
         name=str(_clean(spec.get("name"), "") or str(ip)),
         camera=camera,
+        rtsp_url=_clean(spec.get("rtsp_url")),
     )
 
 
@@ -160,6 +161,7 @@ def _build_cameras(options: dict, args: argparse.Namespace) -> list[CameraEntry]
                 "username": args.user,
                 "password": args.password,
                 "channel": args.channel,
+                "rtsp_url": args.rtsp_url,
             },
             0, sdk_dir, speak_rate,
         )
@@ -189,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--user", default=os.environ.get("HIK_USER", "admin"))
     parser.add_argument("--password", default=os.environ.get("HIK_PASSWORD", ""))
     parser.add_argument("--channel", type=int, default=int(os.environ.get("HIK_CHANNEL", 1)))
+    parser.add_argument("--rtsp-url", default=os.environ.get("HIK_RTSP_URL"))
     parser.add_argument("--sdk-dir", default=os.environ.get("HIK_SDK_DIR"))
     parser.add_argument("--speak-rate", type=int,
                         default=int(os.environ.get("HIK_SPEAK_RATE", 16000)))

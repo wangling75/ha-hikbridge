@@ -18,8 +18,9 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
     AAC/G.711 automatically (the tested 207 camera uses AAC/16 kHz)
 * Live two-way talk over a WebSocket (`/talk`) - the built-in web UI streams
   the browser microphone, or an audio file, straight to the camera speaker
-* Built-in web UI at `http://<ha-host>:8654/` with camera tabs, snapshot
-  preview/download, PTZ pad and push-to-talk
+* Built-in web UI at `http://<ha-host>:8654/` with camera tabs, live
+  RTSP video/audio (`/live.mp4`, playable with the sound button),
+  snapshot fallback/download, PTZ pad and click-to-toggle talk
 
 ## Install
 
@@ -102,6 +103,7 @@ GET  /                                    built-in web UI
 GET  /health                              {"ok": true, "cameras": [...]}
 GET  /api/cameras                         camera list
 GET  /api/cameras/<id>/snapshot.jpg       image/jpeg (?download=1 saves it)
+GET  /api/cameras/<id>/live.mp4           fragmented MP4: RTSP video + AAC audio
 POST /api/cameras/<id>/ptz                {"direction": "right", "duration": 0.6}
 POST /api/cameras/<id>/ptz/start          {"direction": "right"}
 POST /api/cameras/<id>/ptz/stop

@@ -39,6 +39,8 @@
   .panel h2{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 10px;letter-spacing:0}
   .frame{position:relative;background:#000;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
   .frame img{width:100%;height:100%;object-fit:contain;display:block}
+  .frame img,.frame video{width:100%;height:100%;object-fit:contain;display:block}
+  .frame video{background:#000}
   .snapmsg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;pointer-events:none;text-align:center;padding:12px}
   .snapmsg.hide{display:none}
 
@@ -85,7 +87,7 @@
   [data-dir=down]{grid-column:2;grid-row:3}
 
   .talk{width:100%;justify-content:center;padding:14px;font-size:15px;font-weight:600;
-    background:#1b2a22;border-color:#2f5b45;color:#9be7bd;user-select:none;touch-action:none}
+    background:#1b2a22;border-color:#2f5b45;color:#9be7bd;user-select:none;-webkit-user-select:none;touch-action:manipulation}
   .talk:hover:not(:disabled){background:#213328;border-color:#3d7a5b}
   .talk.live{background:#5a1d20;border-color:#8c3134;color:#ffd7d8}
   .talk.live:hover:not(:disabled){background:#6b2427}
@@ -127,6 +129,7 @@
 <main>
   <section class="panel">
     <div class="frame">
+      <video id="live" controls playsinline autoplay muted></video>
       <img id="snap" alt="">
       <div class="snapmsg" id="snapMsg">正在加载画面…</div>
     </div>
@@ -149,6 +152,14 @@
       <button class="btn" id="refresh">
         <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/></svg>
         立即刷新
+      </button>
+      <button class="btn" id="liveToggle">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M8 10l4 2-4 2z"/></svg>
+        实时画面
+      </button>
+      <button class="btn" id="soundToggle" disabled>
+        <svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 4V5L9 9z"/><path d="M17 9a4 4 0 0 1 0 6"/></svg>
+        开启声音
       </button>
     </div>
   </section>
@@ -173,7 +184,7 @@
     </div>
 
     <h2 style="margin-top:14px">喊话</h2>
-    <button class="btn talk" id="talk">按住说话</button>
+    <button class="btn talk" id="talk">点击开始喊话</button>
     <div class="row" style="justify-content:center">
       <button class="btn" id="pickFile">
         <svg viewBox="0 0 24 24"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/></svg>
@@ -213,6 +224,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var dot = $("dot"), statusText = $("statusText");
   var snap = $("snap"), snapMsg = $("snapMsg"), snapTime = $("snapTime");
+  var live = $("live"), liveToggle = $("liveToggle"), soundToggle = $("soundToggle");
   var logBox = $("log"), tabsBox = $("tabs"), notice = $("notice");
   var talkBtn = $("talk"), fileInput = $("file"), fileInfo = $("fileInfo");
   var padButtons = Array.prototype.slice.call(document.querySelectorAll("[data-dir]"));
@@ -311,12 +323,14 @@
   function select(id) {
     if (current && current.id === id) return;
     stopTalk();
+    stopLive();
     current = cameras.filter(function (c) { return c.id === id; })[0] || cameras[0];
     Array.prototype.forEach.call(tabsBox.children, function (b) {
       b.classList.toggle("on", b.dataset.id === current.id);
     });
     log("切换到 " + (current.name || current.id));
     applyRate(snapRate);
+    if (current.live) startLive();
   }
 
   // ---- 抓图 ----
@@ -331,6 +345,7 @@
     snapTime.textContent = new Date(lastSnap).toLocaleTimeString("zh-CN", { hour12: false }) + " 更新";
   });
   snap.addEventListener("error", function () {
+    if (liveState.active) return;
     snapMsg.textContent = "取不到画面";
     snapMsg.classList.remove("hide");
     setStatus(false, "取图失败");
@@ -374,6 +389,174 @@
     a.click();
     a.remove();
     log("已请求抓图下载");
+  });
+
+  // ---- 实时画面：RTSP 在服务端转成分片 MP4，再由 MSE 播放音频和视频 ----
+  var liveState = {
+    source: null, buffer: null, abort: null, objectUrl: null,
+    queue: [], active: false
+  };
+
+  function liveMime() {
+    var MS = window.MediaSource || window.ManagedMediaSource;
+    var candidates = [
+      'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
+      'video/mp4; codecs="avc1.4D401F,mp4a.40.2"',
+      'video/mp4; codecs="avc1.640028,mp4a.40.2"',
+      'video/mp4; codecs="avc1.42E01E"',
+      'video/mp4'
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      if (!MS.isTypeSupported || MS.isTypeSupported(candidates[i])) return candidates[i];
+    }
+    return "";
+  }
+
+  function setLiveUi(on) {
+    liveToggle.textContent = on ? "关闭实时" : "实时画面";
+    soundToggle.disabled = !on;
+    if (!on) soundToggle.textContent = "开启声音";
+  }
+
+  function stopLive() {
+    liveState.active = false;
+    if (liveState.abort) {
+      try { liveState.abort.abort(); } catch (e) {}
+    }
+    if (liveState.source && liveState.source.readyState === "open") {
+      try { liveState.source.endOfStream(); } catch (e) {}
+    }
+    liveState.source = null;
+    liveState.buffer = null;
+    liveState.abort = null;
+    liveState.queue = [];
+    if (liveState.objectUrl) {
+      try { URL.revokeObjectURL(liveState.objectUrl); } catch (e) {}
+      liveState.objectUrl = null;
+    }
+    try { live.pause(); } catch (e) {}
+    live.removeAttribute("src");
+    try { live.load(); } catch (e) {}
+    live.style.display = "none";
+    snap.style.display = "";
+    setLiveUi(false);
+  }
+
+  function failLive(err) {
+    if (!liveState.active) return;
+    var message = err && err.message ? err.message : String(err || "未知错误");
+    log("实时画面不可用：" + message, "e");
+    stopLive();
+    showNotice("实时画面加载失败，已保留抓图预览。<br>" + message);
+  }
+
+  function trimLive() {
+    var sb = liveState.buffer;
+    if (!sb || sb.updating || !sb.buffered.length) return;
+    var start = sb.buffered.start(0);
+    var end = sb.buffered.end(sb.buffered.length - 1);
+    if (end - start > 20) {
+      try { sb.remove(start, end - 20); } catch (e) {}
+    }
+  }
+
+  function pumpLive() {
+    var sb = liveState.buffer;
+    if (!sb || sb.updating || !liveState.queue.length) return;
+    var chunk = liveState.queue.shift();
+    try {
+      sb.appendBuffer(chunk);
+    } catch (e) {
+      if (e.name === "QuotaExceededError") {
+        liveState.queue.unshift(chunk);
+        trimLive();
+        setTimeout(pumpLive, 150);
+      } else {
+        failLive(e);
+      }
+    }
+  }
+
+  function enqueueLive(chunk) {
+    if (!liveState.active) return;
+    liveState.queue.push(chunk);
+    if (liveState.queue.length > 120) liveState.queue.shift();
+    pumpLive();
+  }
+
+  function startLive() {
+    if (!current || !current.live) {
+      showNotice("该摄像头没有配置 <code>rtsp_url</code>，只能使用抓图预览。");
+      return;
+    }
+    var MS = window.MediaSource || window.ManagedMediaSource;
+    if (!MS) {
+      showNotice("当前浏览器不支持实时 MP4 播放，已保留抓图预览。");
+      return;
+    }
+    stopLive();
+    notice.classList.add("hide");
+    var source = new MS();
+    liveState.source = source;
+    liveState.objectUrl = URL.createObjectURL(source);
+    live.src = liveState.objectUrl;
+    live.style.display = "block";
+    snap.style.display = "none";
+    live.muted = true;
+    liveState.active = true;
+    setLiveUi(true);
+    live.play().catch(function () {});
+    source.addEventListener("sourceopen", function () {
+      var mime = liveMime();
+      if (!mime) { failLive(new Error("浏览器不支持 MP4/AAC")); return; }
+      try { liveState.buffer = source.addSourceBuffer(mime); }
+      catch (e) { failLive(e); return; }
+      liveState.buffer.mode = "segments";
+      liveState.buffer.addEventListener("updateend", function () {
+        trimLive();
+        pumpLive();
+      });
+      var controller = new AbortController();
+      liveState.abort = controller;
+      fetch(withToken(BASE + camPath(current.id, "/live.mp4")), {
+        cache: "no-store", signal: controller.signal
+      }).then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        if (!resp.body || !resp.body.getReader) throw new Error("浏览器不支持流式响应");
+        var reader = resp.body.getReader();
+        (function read() {
+          reader.read().then(function (result) {
+            if (result.done) return;
+            enqueueLive(new Uint8Array(result.value));
+            read();
+          }).catch(function (e) {
+            if (e.name !== "AbortError") failLive(e);
+          });
+        })();
+      }).catch(function (e) {
+        if (e.name !== "AbortError") failLive(e);
+      });
+    });
+  }
+
+  liveToggle.addEventListener("click", function () {
+    if (liveState.active) stopLive(); else startLive();
+  });
+  soundToggle.addEventListener("click", function () {
+    if (!liveState.active) return;
+    live.muted = false;
+    live.volume = 1;
+    live.play().then(function () {
+      soundToggle.textContent = "声音已开启";
+      soundToggle.disabled = true;
+    }).catch(function (e) { log("声音开启失败：" + e.message, "e"); });
+  });
+  live.addEventListener("playing", function () {
+    snapMsg.classList.add("hide");
+    setStatus(true, "实时画面");
+  });
+  live.addEventListener("error", function () {
+    if (liveState.active) failLive(new Error("视频解码失败"));
   });
 
   // ---- 云台 ----
@@ -432,7 +615,7 @@
   function setTalkUi(live, text) {
     talk.live = live;
     talkBtn.classList.toggle("live", live);
-    talkBtn.textContent = text || (live ? "松开结束" : "按住说话");
+    talkBtn.textContent = text || (live ? "点击结束喊话" : "点击开始喊话");
   }
 
   function micBlocked() {
@@ -446,7 +629,7 @@
       "1）在插件配置里把 <code>ssl</code> 打开并重启插件，改用 " +
       "<code>https://" + location.hostname + ":" + (httpsPort || 8655) +
       PATH_BASE + "/</code> 打开本页" +
-      "（自签证书浏览器会提示一次，选择继续访问），之后「按住说话」就能用；<br>" +
+      "（自签证书浏览器会提示一次，选择继续访问），之后「点击开始喊话」就能用；<br>" +
       "2）或者用「播放音频文件」把录音/文字转好的音频发到摄像头喇叭。"
     );
   }
@@ -536,7 +719,7 @@
       sink.connect(ctx.destination);
       talk.node = node;
       talk.sink = sink;
-      setTalkUi(true, "正在喊话 · 松开结束");
+      setTalkUi(true, "正在喊话 · 点击结束");
       log("麦克风已连接，开始喊话", "s");
     }).catch(function (e) {
       log("麦克风不可用：" + e.message, "e");
@@ -557,19 +740,16 @@
     }
     talk.ws = null; talk.ctx = null; talk.stream = null;
     talk.node = null; talk.sink = null; talk.mode = "";
-    setTalkUi(false, "按住说话");
+    setTalkUi(false, "点击开始喊话");
     if (wasLive) log("喊话结束");
   }
 
-  talkBtn.addEventListener("pointerdown", function (ev) {
+  talkBtn.addEventListener("click", function (ev) {
     ev.preventDefault();
-    try { talkBtn.setPointerCapture(ev.pointerId); } catch (e) {}
-    startTalk();
+    if (talk.live) stopTalk(); else startTalk();
   });
-  ["pointerup", "pointercancel", "pointerleave"].forEach(function (name) {
-    talkBtn.addEventListener(name, function () {
-      if (talk.live && talk.mode === "mic") stopTalk();
-    });
+  ["contextmenu", "copy", "selectstart"].forEach(function (name) {
+    talkBtn.addEventListener(name, function (ev) { ev.preventDefault(); });
   });
 
   // ---- 播放音频文件（无需麦克风权限）----
@@ -614,7 +794,7 @@
       ws.binaryType = "arraybuffer";
       ws.onerror = function () { reject(new Error("喊话通道出错")); };
       ws.onclose = function () {
-        if (talk.mode === "file") { talk.ws = null; talk.mode = ""; setTalkUi(false, "按住说话"); }
+        if (talk.mode === "file") { talk.ws = null; talk.mode = ""; setTalkUi(false, "点击开始喊话"); }
         resolve();
       };
       ws.onmessage = function (ev) {
@@ -635,7 +815,7 @@
           if (offset >= pcm.length) {
             setTimeout(function () {
               try { ws.send(JSON.stringify({ cmd: "stop" })); ws.close(); } catch (e) {}
-              setTalkUi(false, "按住说话");
+              setTalkUi(false, "点击开始喊话");
               talk.mode = "";
             }, 350);
             return;
@@ -719,6 +899,7 @@
   }
 
   window.addEventListener("beforeunload", stopTalk);
+  window.addEventListener("beforeunload", stopLive);
   boot();
 })();
 </script>
