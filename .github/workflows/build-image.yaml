@@ -35,7 +35,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:latest
-            ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:0.2.4
+            ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:0.2.5
 
       - name: Verify public image
         run: |
@@ -45,5 +45,5 @@ jobs:
           curl -fsS -o /dev/null \
             -H "Authorization: Bearer ${token}" \
             -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
-            "https://ghcr.io/v2/${owner}/amd64-hikbridge/manifests/0.2.4"
-          echo "Public GHCR image available: ghcr.io/${owner}/amd64-hikbridge:0.2.4"
+            "https://ghcr.io/v2/${owner}/amd64-hikbridge/manifests/0.2.5"
+          echo "Public GHCR image available: ghcr.io/${owner}/amd64-hikbridge:0.2.5"

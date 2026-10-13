@@ -45,6 +45,11 @@ def _apply_host_timezone() -> None:
     API, and TZ has to be set before the first log record is formatted.
     """
     fallback_zone = os.environ.get("TZ") or "UTC"
+    try:
+        time.tzset()
+    except AttributeError:  # pragma: no cover - Windows only
+        pass
+
     hikbridge.timezone_status = f"fallback: {fallback_zone}"
 
     token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
