@@ -47,6 +47,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 | `hikbridge/` | HAOS 插件（Debian + HCNetSDK + HTTP 引擎） |
 | `custom_components/hikbridge/` | HA 自定义集成（摄像头、按钮、服务） |
 | `repository.json` | 声明这是一个 HA 加载项仓库 |
+| `hacs.json` | 声明 HACS 集成仓库元数据 |
 | `options.example.json` | 纯 Docker 部署的配置示例 |
 | `docker-compose.example.yml` | 纯 Docker 部署的 Compose 示例 |
 
