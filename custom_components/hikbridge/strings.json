@@ -1,0 +1,55 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to the hikbridge add-on",
+        "description": "Point this at the Hikvision PTZ Bridge add-on. With host networking enabled the add-on listens on 127.0.0.1:8654.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "Auth token",
+          "rtsp_url": "RTSP URL",
+          "tts_entity": "TTS entity",
+          "nudge_seconds": "Button nudge duration"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the add-on. Is it started?",
+      "invalid_auth": "The add-on rejected the auth token.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This camera is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Hikvision PTZ Bridge options",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "Auth token",
+          "rtsp_url": "RTSP URL",
+          "tts_entity": "TTS entity",
+          "nudge_seconds": "Button nudge duration"
+        }
+      }
+    }
+  },
+  "services": {
+    "move": {
+      "name": "Move",
+      "description": "Nudge the camera pan/tilt in a direction."
+    },
+    "stop": {
+      "name": "Stop",
+      "description": "Stop pan/tilt movement."
+    },
+    "speak": {
+      "name": "Speak",
+      "description": "Play audio on the camera speaker."
+    }
+  }
+}

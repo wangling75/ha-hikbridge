@@ -1,0 +1,72 @@
+move:
+  name: Move
+  description: Nudge the camera pan/tilt in a direction for a short time.
+  target:
+    entity:
+      integration: hikbridge
+  fields:
+    direction:
+      name: Direction
+      description: Which way to move.
+      required: true
+      selector:
+        select:
+          options:
+            - up
+            - down
+            - left
+            - right
+    duration:
+      name: Duration
+      description: Seconds to keep moving.
+      default: 0.6
+      selector:
+        number:
+          min: 0.05
+          max: 10
+          step: 0.05
+          unit_of_measurement: s
+
+stop:
+  name: Stop
+  description: Stop any pan/tilt movement.
+  target:
+    entity:
+      integration: hikbridge
+
+speak:
+  name: Speak
+  description: >-
+    Play audio on the camera speaker. Either pass text (rendered by a Home
+    Assistant TTS entity) or media_url pointing at a WAV file.
+  target:
+    entity:
+      integration: hikbridge
+  fields:
+    text:
+      name: Text
+      description: Text to speak through the camera speaker.
+      selector:
+        text:
+    media_url:
+      name: Media URL
+      description: HTTP(S) URL of a WAV file to play instead of text.
+      selector:
+        text:
+    tts_entity:
+      name: TTS entity
+      description: TTS entity to render the text with. Defaults to the one configured on the integration.
+      selector:
+        entity:
+          domain: tts
+    language:
+      name: Language
+      description: Optional language override for the TTS engine.
+      selector:
+        text:
+    cache:
+      name: Cache
+      description: Ask the TTS engine to cache the generated audio.
+      default: false
+      selector:
+        boolean:

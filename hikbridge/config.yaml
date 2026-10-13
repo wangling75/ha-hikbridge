@@ -1,0 +1,28 @@
+name: "Hikvision PTZ Bridge"
+version: "0.1.0"
+slug: "hikbridge"
+description: "PTZ control, snapshots and speaker TTS for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
+url: "https://github.com/YOUR_GITHUB_USER/ha-hikbridge"
+arch:
+  - amd64
+image: "ghcr.io/YOUR_GITHUB_USER/{arch}-{slug}"
+startup: application
+boot: auto
+init: false
+host_network: true
+options:
+  camera_ip: "192.168.2.207"
+  camera_port: 8000
+  username: "admin"
+  password: ""
+  channel: 1
+  speak_sample_rate: 16000
+  auth_token: ""
+schema:
+  camera_ip: str
+  camera_port: port
+  username: str
+  password: password
+  channel: int
+  speak_sample_rate: list(8000|16000)
+  auth_token: str?

@@ -1,0 +1,14 @@
+{
+  "domain": "hikbridge",
+  "name": "Hikvision PTZ Bridge",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://github.com/",
+  "issue_tracker": "https://github.com/",
+  "codeowners": [],
+  "after_dependencies": ["tts", "media_source"],
+  "dependencies": [],
+  "requirements": [],
+  "iot_class": "local_polling",
+  "integration_type": "hub"
+}

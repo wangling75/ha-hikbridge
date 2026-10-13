@@ -1,0 +1,55 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "连接到 hikbridge 插件",
+        "description": "填写 Hikvision PTZ Bridge 插件的地址。启用 host 网络后插件监听在 127.0.0.1:8654。",
+        "data": {
+          "host": "主机",
+          "port": "端口",
+          "token": "鉴权令牌",
+          "rtsp_url": "RTSP 地址",
+          "tts_entity": "TTS 实体",
+          "nudge_seconds": "按钮点动时长"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接插件，请确认已启动。",
+      "invalid_auth": "插件拒绝了鉴权令牌。",
+      "unknown": "未知错误。"
+    },
+    "abort": {
+      "already_configured": "该摄像头已配置。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Hikvision PTZ Bridge 选项",
+        "data": {
+          "host": "主机",
+          "port": "端口",
+          "token": "鉴权令牌",
+          "rtsp_url": "RTSP 地址",
+          "tts_entity": "TTS 实体",
+          "nudge_seconds": "按钮点动时长"
+        }
+      }
+    }
+  },
+  "services": {
+    "move": {
+      "name": "移动",
+      "description": "按方向点动云台。"
+    },
+    "stop": {
+      "name": "停止",
+      "description": "停止云台移动。"
+    },
+    "speak": {
+      "name": "语音播放",
+      "description": "在摄像头喇叭上播放音频。"
+    }
+  }
+}
