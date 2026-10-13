@@ -5,18 +5,18 @@ describe one camera (legacy keys) or a list of cameras:
 
     {
       "cameras": [
-        {"id": "cam207", "name": "客厅", "camera_ip": "192.168.2.207",
-         "camera_port": 8000, "username": "admin", "password": "…",
+        {"id": "cam207", "name": "camera 207", "camera_ip": "192.168.2.207",
+         "camera_port": 8000, "username": "admin", "password": "...",
          "channel": 1,
-         "rtsp_url": "rtsp://…"},
-        {"id": "cam225", "name": "院子", "camera_ip": "192.168.2.225", …}
+         "rtsp_url": "rtsp://..."},
+        {"id": "cam225", "name": "camera 225", "camera_ip": "192.168.2.225"}
       ],
       "speak_sample_rate": 16000,
       "auth_token": ""
     }
 
-The old single-camera keys (camera_ip, username, …) and the command line flags
-still work, so an existing install keeps running after the update.
+The old single-camera keys (camera_ip, username, ...) and the command line
+flags still work, so an existing install keeps running after the update.
 """
 from __future__ import annotations
 
@@ -26,11 +26,45 @@ import logging
 import os
 import signal
 import sys
+import time
+import urllib.request
 
 from .server import CameraEntry, serve
 from .sdk import HikCamera
 
 _LOGGER = logging.getLogger("hikbridge")
+
+
+def _apply_host_timezone() -> None:
+    """Adopt the Home Assistant host timezone so log stamps match the UI.
+
+    The container starts in UTC, which makes every log line look eight hours
+    off on a UTC+8 host. Supervisor exposes the configured zone over its own
+    API, and TZ has to be set before the first log record is formatted.
+    """
+    if os.environ.get("TZ"):
+        return
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        return
+    try:
+        request = urllib.request.Request(
+            "http://supervisor/supervisor/info",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+        zone = (payload.get("data") or {}).get("timezone")
+    except Exception as exc:  # noqa: BLE001 - the timezone is cosmetic
+        print(f"hikbridge: cannot read the host timezone: {exc}", file=sys.stderr)
+        return
+    if not zone:
+        return
+    os.environ["TZ"] = str(zone)
+    try:
+        time.tzset()
+    except AttributeError:  # pragma: no cover - Windows only
+        pass
 
 
 def _read_options(path: str | None) -> dict:
@@ -116,7 +150,7 @@ def _build_cameras(options: dict, args: argparse.Namespace) -> list[CameraEntry]
 
     # Keep ids unique so the URL routing stays unambiguous.
     seen: set[str] = set()
-    for index, entry in enumerate(entries):
+    for entry in entries:
         base = entry.id
         suffix = 2
         while entry.id in seen:
@@ -146,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token", default=os.environ.get("HIK_TOKEN"))
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
+
+    _apply_host_timezone()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
