@@ -46,6 +46,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 | --- | --- |
 | `hikbridge/` | HAOS 插件（Debian + HCNetSDK + HTTP 引擎） |
 | `custom_components/hikbridge/` | HA 自定义集成（摄像头、按钮、服务） |
+| `scrypted-hikbridge/` | Scrypted 插件（多摄像头、HomeKit 双向对讲） |
 | `repository.json` | 声明这是一个 HA 加载项仓库 |
 | `hacs.json` | 声明 HACS 集成仓库元数据 |
 | `options.example.json` | 纯 Docker 部署的配置示例 |
@@ -296,6 +297,20 @@ data:
 > TTS 引擎如果不是输出 WAV（比如 Google Translate 输出 MP3），集成会尝试
 > 调用 `ffmpeg` 转码；HAOS 的 Core 容器默认没有 ffmpeg，所以建议用
 > **Piper**（本地 TTS，输出 WAV），或者用 `media_url` 传现成的 WAV。
+
+## Scrypted / HomeKit 双向对讲
+
+仓库里的 `scrypted-hikbridge/` 是一个独立的 Scrypted 插件，用于把同一批
+海康 / 萤石摄像头接入 HomeKit，并实现按住说话。
+
+- 视频和摄像头麦克风走 RTSP
+- 手机对讲音频通过 Hikbridge 的 `/talk` 下发到摄像头喇叭
+- 多摄像头独立配置，可分别控制对讲开关
+- 207 这类 RTSP 有音轨且支持语音对讲的设备可用
+- 225 这类无 RTSP 音轨、对讲能力为 0 的设备只能做视频
+
+完整安装、部署和排错说明见：
+[`scrypted-hikbridge/README.md`](scrypted-hikbridge/README.md)。
 
 ## 插件 HTTP API
 

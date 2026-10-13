@@ -1,0 +1,63 @@
+{
+  "name": "@wangling75/scrypted-hikbridge",
+  "version": "0.1.0",
+  "description": "Scrypted camera provider for Hikvision / EZVIZ cameras using the Hikvision PTZ Bridge add-on for two-way audio.",
+  "author": "wangling75",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wangling75/ha-hikbridge.git",
+    "directory": "scrypted-hikbridge"
+  },
+  "homepage": "https://github.com/wangling75/ha-hikbridge/tree/main/scrypted-hikbridge",
+  "keywords": [
+    "scrypted",
+    "plugin",
+    "hikvision",
+    "ezviz",
+    "camera",
+    "intercom"
+  ],
+  "main": "dist/main.nodejs.js",
+  "packageManager": "pnpm@11.25.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "scrypted-setup-project": "node scripts/scrypted-cli.mjs scrypted-setup-project",
+    "prescrypted-setup-project": "node scripts/scrypted-cli.mjs scrypted-package-json",
+    "build": "NODE_ENV=production node scripts/scrypted-cli.mjs scrypted-webpack",
+    "build:dev": "node scripts/scrypted-cli.mjs scrypted-webpack",
+    "prepublishOnly": "NODE_ENV=production node scripts/scrypted-cli.mjs scrypted-webpack",
+    "scrypted-deploy": "node scripts/scrypted-cli.mjs scrypted-deploy",
+    "scrypted-deploy-debug": "node scripts/scrypted-cli.mjs scrypted-deploy-debug",
+    "scrypted-debug": "node scripts/scrypted-cli.mjs scrypted-debug",
+    "scrypted-vscode-launch": "node scripts/scrypted-cli.mjs scrypted-deploy-debug"
+  },
+  "scrypted": {
+    "rollup": true,
+    "name": "Hikvision / EZVIZ Bridge Camera",
+    "type": "DeviceProvider",
+    "interfaces": [
+      "ScryptedSystemDevice",
+      "ScryptedDeviceCreator",
+      "DeviceProvider",
+      "DeviceCreator"
+    ]
+  },
+  "dependencies": {
+    "@scrypted/sdk": "^0.5.59",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/ws": "^8.18.1",
+    "terser-webpack-plugin": "^5.6.1",
+    "typescript": "^5.9.3"
+  }
+}
