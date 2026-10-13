@@ -1,4 +1,4 @@
-ARG BUILD_FROM=debian:bookworm-slim
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 FROM ${BUILD_FROM}
 
 ENV DEBIAN_FRONTEND=noninteractive \
