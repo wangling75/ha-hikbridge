@@ -5,7 +5,6 @@ description: "PTZ control, snapshots and speaker TTS for Hikvision/EZVIZ cameras
 url: "https://github.com/wangling75/ha-hikbridge"
 arch:
   - amd64
-image: "ghcr.io/wangling75/{arch}-{slug}"
 startup: application
 boot: auto
 init: false
