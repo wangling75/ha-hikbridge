@@ -40,7 +40,6 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 | `hikbridge/` | HAOS 插件（Debian + HCNetSDK + HTTP 引擎） |
 | `custom_components/hikbridge/` | HA 自定义集成（摄像头、按钮、服务） |
 | `repository.json` | 声明这是一个 HA 加载项仓库 |
-| `.github/workflows/builder.yaml` | 推送后自动构建镜像并推送到 GHCR |
 
 ## 一、托管到 GitHub
 
@@ -70,23 +69,20 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 
    改完再 push 一次。
 
-3. 推送会触发 `.github/workflows/builder.yaml`，把镜像构建好推到
-   `ghcr.io/<你的用户名>/amd64-hikbridge`。第一次构建要几分钟，去
-   **Actions** 页面确认变绿。
+3. 这个仓库不使用预构建镜像。HAOS 添加仓库后会在本机按 `hikbridge/Dockerfile`
+   自动构建 amd64 插件，不依赖 GHCR，也不需要在电脑上装 Docker。
 
 4. 回到 HA：
 
    **设置 → 加载项 → 加载项商店 → 右上角三个点 → 仓库 → 粘贴
    `https://github.com/<你的用户名>/ha-hikbridge` → 添加**
 
+   如果提示 `StoreManager.add_repository blocked ... supervisor needs to be
+   updated first`，先到 **设置 → 系统 → 更新** 把 Supervisor 更新到最新，
+   必要时也更新 Home Assistant OS，然后重试。
+
    「Hikvision PTZ Bridge」会出现在商店里，直接安装、填参数、启动。
-   HA 会直接从 GHCR 拉镜像，不用在机器上构建。
-
-### 不想用 CI 也行
-
-把 `hikbridge/config.yaml` 里的 `image:` 这一行**删掉或注释掉**，再把
-`hikbridge/` 目录整个拷到 HA 机器的 `/addons/hikbridge`（Samba 或 SSH 加载项）。
-这样 HA 会把它当作本地加载项，在你机器上构建镜像。
+   首次安装会在 HAOS 里构建镜像，需要几分钟。
 
 ### 许可提醒
 

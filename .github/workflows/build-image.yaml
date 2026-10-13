@@ -1,26 +1,24 @@
-name: Build add-on
+name: Build add-on image
 
 on:
   push:
     branches: [main]
     paths:
       - "hikbridge/**"
-      - "repository.json"
-      - ".github/workflows/builder.yaml"
+      - ".github/workflows/build-image.yaml"
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }} add-on
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      matrix:
-        arch: [amd64]
+
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -30,10 +28,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: home-assistant/builder@master
+        uses: docker/build-push-action@v6
         with:
-          args: |
-            --${{ matrix.arch }} \
-            --target /data/hikbridge \
-            --docker-hub ghcr.io/${{ github.repository_owner }} \
-            --image "{arch}-{slug}"
+          context: ./hikbridge
+          file: ./hikbridge/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:latest
