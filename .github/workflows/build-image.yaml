@@ -33,13 +33,17 @@ jobs:
           context: ./hikbridge
           file: ./hikbridge/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:latest
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:latest
+            ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:0.1.0
 
-      - name: Make GHCR package public
-        continue-on-error: true
+      - name: Verify public image
         run: |
-          curl -sS -X PATCH \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/user/packages/container/amd64-hikbridge \
-            -d '{"visibility":"public"}'
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          token=$(curl -fsS "https://ghcr.io/token?service=ghcr.io&scope=repository:${owner}/amd64-hikbridge:pull" | jq -r .token)
+          curl -fsS -o /dev/null \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${owner}/amd64-hikbridge/manifests/0.1.0"
+          echo "Public GHCR image available: ghcr.io/${owner}/amd64-hikbridge:0.1.0"
