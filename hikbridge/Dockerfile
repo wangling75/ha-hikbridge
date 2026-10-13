@@ -4,6 +4,7 @@ FROM ${BUILD_FROM}
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
+    TZ=Asia/Shanghai \
     HIK_SDK_DIR=/opt/hikbridge/hcnetsdk \
     ALSA_CONFIG_PATH=/opt/hikbridge/hikbridge/asound.conf \
     LD_LIBRARY_PATH=/opt/hikbridge/hcnetsdk:/opt/hikbridge/hcnetsdk/HCNetSDKCom
@@ -12,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # which refuses to initialise without a playback device. A null PCM device is
 # enough and is supplied through ALSA_CONFIG_PATH (see asound.conf).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 libasound2 \
+    && apt-get install -y --no-install-recommends python3 libasound2 tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 COPY hikbridge /opt/hikbridge/hikbridge

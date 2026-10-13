@@ -44,7 +44,10 @@ def _apply_host_timezone() -> None:
     off on a UTC+8 host. Supervisor exposes the configured zone over its own
     API, and TZ has to be set before the first log record is formatted.
     """
-    token = os.environ.get("SUPERVISOR_TOKEN")
+    fallback_zone = os.environ.get("TZ") or "UTC"
+    hikbridge.timezone_status = f"fallback: {fallback_zone}"
+
+    token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
     if not token:
         return
     try:
@@ -61,10 +64,12 @@ def _apply_host_timezone() -> None:
         zone = body.get("timezone")
     except Exception as exc:  # noqa: BLE001 - the timezone is cosmetic
         print(f"hikbridge: cannot read the host timezone: {exc}", file=sys.stderr)
-        hikbridge.timezone_status = f"lookup failed: {exc}"
+        hikbridge.timezone_status = f"lookup failed: {exc}; using {fallback_zone}"
         return
     if not zone:
-        hikbridge.timezone_status = "host did not report a timezone"
+        hikbridge.timezone_status = (
+            f"host did not report a timezone; using {fallback_zone}"
+        )
         return
     os.environ["TZ"] = str(zone)
     try:
