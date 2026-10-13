@@ -1,5 +1,5 @@
 name: "Hikvision PTZ Bridge"
-version: "0.1.0"
+version: "0.1.1"
 slug: "hikbridge"
 description: "PTZ control, snapshots and speaker TTS for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
 url: "https://github.com/wangling75/ha-hikbridge"

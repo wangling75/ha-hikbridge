@@ -29,6 +29,7 @@ export HIK_SPEAK_RATE="${SPEAK_RATE:-16000}"
 export HIK_TOKEN="$TOKEN"
 export HIK_LISTEN="0.0.0.0"
 export HIK_LISTEN_PORT="8654"
+export HIK_SDK_DIR="/opt/hikbridge/hcnetsdk"
 
 echo "hikbridge: camera ${HIK_IP}:${HIK_PORT} channel ${HIK_CHANNEL}"
 exec python3 -m hikbridge --verbose
