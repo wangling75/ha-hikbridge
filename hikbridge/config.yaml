@@ -1,5 +1,5 @@
 name: "Hikvision PTZ Bridge"
-version: "0.2.1"
+version: "0.2.2"
 slug: "hikbridge"
 description: "PTZ control, snapshots, live two-way talk and speaker playback for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
 url: "https://github.com/wangling75/ha-hikbridge"
@@ -10,6 +10,7 @@ startup: application
 boot: auto
 init: false
 host_network: true
+hassio_api: true
 ingress: true
 ingress_port: 8654
 panel_icon: "mdi:webcam"

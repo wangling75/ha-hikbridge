@@ -191,6 +191,7 @@ def _handler(state: _State):
                     self._json(200, {
                         "ok": True,
                         "version": __version__,
+                        "timezone": os.environ.get("TZ") or time.tzname[0],
                         "serial": default.camera.serial,
                         "device": default.camera.device,
                         "cameras": state.info_list(),

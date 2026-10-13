@@ -54,7 +54,11 @@ def _apply_host_timezone() -> None:
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             payload = json.load(response)
-        zone = (payload.get("data") or {}).get("timezone")
+        # Supervisor wraps most responses in {"result": ..., "data": ...}.
+        body = payload.get("data")
+        if not isinstance(body, dict):
+            body = payload
+        zone = body.get("timezone")
     except Exception as exc:  # noqa: BLE001 - the timezone is cosmetic
         print(f"hikbridge: cannot read the host timezone: {exc}", file=sys.stderr)
         return
