@@ -32,6 +32,14 @@ The add-on also registers a sidebar panel through Home Assistant **ingress**,
 so the same UI can be opened from the HA sidebar. The direct address
 `http://<ha-host>:8654/` keeps working because host networking is enabled.
 
+## Standalone Docker
+
+The same image can run outside Home Assistant OS without Supervisor. Use
+`docker run` or `docker compose`, mount `/data/options.json`, expose port
+`8654`, and install the custom integration separately. See the repository
+root `README.md` section `纯 Docker 部署` for the complete Chinese guide,
+`options.example.json`, and `docker-compose.example.yml`.
+
 ### Password
 
 Set `auth_token` to any password. The web UI then shows a login screen

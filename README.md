@@ -6,6 +6,11 @@ EZVIZ OEM 摄像头在 Home Assistant 里实现云台控制、快照和喇叭语
 不需要改固件。摄像头本身已经在 8000 端口上跑着完整的 HCNetSDK 服务，
 这套方案只是用官方 SDK 去调它。
 
+支持两种部署方式：
+
+- **Home Assistant add-on**：适合 Home Assistant OS / Supervised，带侧边栏、ingress、开机自启和商店更新。
+- **纯 Docker**：适合 HA Container、群晖、威联通、普通 Linux 或 ESXi 里的独立虚拟机；只运行同一个镜像，HA 集成通过 HTTP 连接它。
+
 ## 为什么需要一个 add-on
 
 Home Assistant OS（你 ESXi 里的那台）把 Home Assistant Core 跑在 **Alpine
@@ -33,6 +38,8 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 网络，所以 HA 通过 `127.0.0.1:8654` 就能访问到。整个过程 HA 自己管理容器，
 你不需要碰 Docker。
 
+> 不想用 HA add-on 也可以直接看下面的「纯 Docker 部署」。两种方式运行的是同一个镜像，API、Web UI、云台和喊话功能一致。
+
 ## 目录
 
 | 路径 | 作用 |
@@ -40,6 +47,8 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 | `hikbridge/` | HAOS 插件（Debian + HCNetSDK + HTTP 引擎） |
 | `custom_components/hikbridge/` | HA 自定义集成（摄像头、按钮、服务） |
 | `repository.json` | 声明这是一个 HA 加载项仓库 |
+| `options.example.json` | 纯 Docker 部署的配置示例 |
+| `docker-compose.example.yml` | 纯 Docker 部署的 Compose 示例 |
 
 ## 一、托管到 GitHub
 
@@ -69,8 +78,9 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 
    改完再 push 一次。
 
-3. 这个仓库不使用预构建镜像。HAOS 添加仓库后会在本机按 `hikbridge/Dockerfile`
-   自动构建 amd64 插件，不依赖 GHCR，也不需要在电脑上装 Docker。
+3. 仓库通过 GitHub Actions 构建并发布 amd64 镜像到 GHCR；HAOS 添加仓库后会拉取
+   `ghcr.io/wangling75/amd64-hikbridge:<版本号>`。也可以完全不用 HAOS，直接按
+   「纯 Docker 部署」运行同一个镜像。
 
 4. 回到 HA：
 
@@ -82,7 +92,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
    必要时也更新 Home Assistant OS，然后重试。
 
    「Hikvision PTZ Bridge」会出现在商店里，直接安装、填参数、启动。
-   首次安装会在 HAOS 里构建镜像，需要几分钟。
+   首次安装会拉取 GHCR 镜像，需要几分钟。
 
 ### 许可提醒
 
@@ -90,7 +100,140 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 公开分发前请自行确认这符合 Hikvision 的许可条款；拿不准就用**私有仓库**，
 或者把 SDK 从仓库里排除、改成本地构建时再放进去。
 
-## 二、安装 HA 集成
+## 二、纯 Docker 部署（不使用 HA add-on）
+
+这一节适合 HA Container、群晖、威联通、普通 Linux 或 ESXi 里的独立 Docker 主机。
+插件镜像本身不依赖 Supervisor，HA add-on 只是多了一层商店、ingress 和侧边栏。
+
+### 1. 获取镜像
+
+直接用 GHCR 镜像：
+
+```bash
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.5
+```
+
+或者本地构建：
+
+```bash
+git clone https://github.com/wangling75/ha-hikbridge.git
+cd ha-hikbridge
+docker build -t hikbridge:0.2.5 ./hikbridge
+```
+
+镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
+
+### 2. 准备 options.json
+
+仓库根目录的 `options.example.json` 可以直接复制成 `options.json`：
+
+```bash
+cp options.example.json options.json
+```
+
+然后修改摄像头 IP、账号密码和 `auth_token`。示例：
+
+```json
+{
+  "cameras": [
+    {
+      "id": "cam207",
+      "name": "Camera 207",
+      "camera_ip": "192.168.2.207",
+      "camera_port": 8000,
+      "username": "admin",
+      "password": "你的摄像头密码",
+      "channel": 1,
+      "rtsp_url": "rtsp://admin:你的摄像头密码@192.168.2.207:554/h264/ch1/main/av_stream"
+    },
+    {
+      "id": "cam225",
+      "name": "Camera 225",
+      "camera_ip": "192.168.2.225",
+      "camera_port": 8000,
+      "username": "admin",
+      "password": "你的摄像头密码",
+      "channel": 1
+    }
+  ],
+  "speak_sample_rate": "16000",
+  "auth_token": "CHANGE_ME_TOKEN"
+}
+```
+
+`auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 可选 `8000` 或 `16000`。
+如果 RTSP 密码包含 `@`、`:`、`/` 等字符，需要在 RTSP URL 里做 URL 编码。
+
+### 3. 启动容器
+
+```bash
+docker run -d \
+  --name hikbridge \
+  --restart unless-stopped \
+  -p 8654:8654 \
+  -e HIK_TIMEZONE=Asia/Shanghai \
+  -v "$PWD/options.json:/data/options.json:ro" \
+  ghcr.io/wangling75/amd64-hikbridge:0.2.5
+```
+
+查看日志：
+
+```bash
+docker logs -f hikbridge
+```
+
+验证：
+
+```bash
+curl -s -H 'X-Auth-Token: CHANGE_ME_TOKEN' http://127.0.0.1:8654/health
+```
+
+Web UI：
+
+```text
+http://<Docker主机IP>:8654/
+```
+
+如果设置了 `auth_token`，浏览器会先要求输入这个密码。
+
+### 4. docker-compose 示例
+
+仓库根目录提供了 `docker-compose.example.yml`，复制成 `docker-compose.yml` 后可直接使用：
+
+```bash
+cp docker-compose.example.yml docker-compose.yml
+docker compose up -d
+```
+
+更新镜像：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+### 5. 接入 HA 集成
+
+纯 Docker 只是替代 add-on，HA 里仍然要安装 `custom_components/hikbridge` 集成。
+添加集成时：
+
+| 字段 | 值 |
+| --- | --- |
+| 主机 | Docker 主机 IP |
+| 端口 | `8654` |
+| 鉴权令牌 | 和 `options.json` 的 `auth_token` 一致 |
+| RTSP 地址 | 对应摄像头 RTSP 地址 |
+
+如果 HA Core 和 Docker 在同一台机器上，主机可以填 `127.0.0.1`；如果不在同一台机器上，填 Docker 主机的局域网 IP，例如 `192.168.2.153`。端口要确保防火墙放行。
+
+### 6. HA add-on 和纯 Docker 的区别
+
+| 方式 | 优点 | 限制 |
+| --- | --- | --- |
+| HA add-on | 商店安装、自动启动、ingress 侧边栏、Supervisor 管理 | 只能在 HAOS / Supervised 使用 |
+| 纯 Docker | 任何支持 Docker 的 Linux 主机都能跑 | 没有 HA 侧边栏，需要自己维护 compose/更新 |
+
+## 三、安装 HA 集成
 
 把 `custom_components/hikbridge` 整个目录放到 HA 的 `/config/custom_components/hikbridge`
 （Samba / SSH 加载项），重启 HA。
@@ -107,7 +250,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 | 主机 | `127.0.0.1` |
 | 端口 | `8654` |
 | 鉴权令牌 | 留空（除非你在插件里设了） |
-| RTSP 地址 | `rtsp://admin:CAHGIM@192.168.2.207:554/h264/ch1/main/av_stream` |
+| RTSP 地址 | `rtsp://admin:YOUR_PASSWORD@192.168.2.207:554/h264/ch1/main/av_stream` |
 | TTS 实体 | 例如 `tts.piper`，用于语音播放 |
 | 按钮点动时长 | `0.6` 秒 |
 
