@@ -618,6 +618,38 @@
   // ---- 喊话 ----
   var talk = { ws: null, ctx: null, stream: null, node: null, sink: null, live: false, mode: "" };
 
+  // AudioWorklet 以 128 帧为处理单位；这里聚合成约 16ms 一块，既避开
+  // ScriptProcessor 的 64ms 缓冲，也不会让 WebSocket 每秒发上百个包。
+  var TALK_WORKLET_SOURCE = [
+    "class HikBridgeTalkProcessor extends AudioWorkletProcessor {",
+    "  constructor(options) {",
+    "    super();",
+    "    var opts = options && options.processorOptions;",
+    "    this.chunkSize = (opts && opts.chunkSize) || 256;",
+    "    this.buffer = new Float32Array(this.chunkSize);",
+    "    this.offset = 0;",
+    "  }",
+    "  process(inputs) {",
+    "    var input = inputs[0] && inputs[0][0];",
+    "    if (!input) return true;",
+    "    var pos = 0;",
+    "    while (pos < input.length) {",
+    "      var count = Math.min(this.chunkSize - this.offset, input.length - pos);",
+    "      this.buffer.set(input.subarray(pos, pos + count), this.offset);",
+    "      this.offset += count;",
+    "      pos += count;",
+    "      if (this.offset === this.chunkSize) {",
+    "        var out = this.buffer.slice();",
+    "        this.port.postMessage(out, [out.buffer]);",
+    "        this.offset = 0;",
+    "      }",
+    "    }",
+    "    return true;",
+    "  }",
+    "}",
+    "registerProcessor('hikbridge-talk', HikBridgeTalkProcessor);",
+  ].join("\n");
+
   function talkSocket() {
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     return new WebSocket(
@@ -677,6 +709,53 @@
     return out;
   }
 
+  function makeTalkContext() {
+    var Ctor = window.AudioContext || window.webkitAudioContext;
+    try {
+      return new Ctor({ sampleRate: 16000, latencyHint: "interactive" });
+    } catch (e) {
+      return new Ctor({ latencyHint: "interactive" });
+    }
+  }
+
+  function createTalkWorklet(ctx, onChunk) {
+    if (!ctx.audioWorklet || !window.AudioWorkletNode ||
+        !window.URL || !window.Blob || !window.URL.createObjectURL) {
+      return Promise.resolve(null);
+    }
+    var url = window.URL.createObjectURL(new Blob([TALK_WORKLET_SOURCE], {
+      type: "application/javascript"
+    }));
+    talk.workletUrl = url;
+    return ctx.audioWorklet.addModule(url).then(function () {
+      var node = new window.AudioWorkletNode(ctx, "hikbridge-talk", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        processorOptions: {
+          chunkSize: Math.max(128, Math.round(ctx.sampleRate * 0.016))
+        }
+      });
+      node.port.onmessage = function (ev) { onChunk(ev.data); };
+      return node;
+    }).catch(function () {
+      if (talk.workletUrl === url) {
+        try { window.URL.revokeObjectURL(url); } catch (e) {}
+        talk.workletUrl = null;
+      }
+      return null;
+    });
+  }
+
+  function sendTalkChunk(input, resample) {
+    if (!talk.live || !talk.ws || talk.ws.readyState !== 1) return;
+    // If the camera or the bridge is behind, drop stale microphone data
+    // instead of building an ever-growing audio delay.
+    if (talk.ws.bufferedAmount > 8192) return;
+    var pcm = floatToPcm16(resample ? resample(input) : input);
+    try { talk.ws.send(pcm.buffer); } catch (e) {}
+  }
+
   function startTalk() {
     if (talk.live || !current) return;
     if (micBlocked()) { showMicHelp(); return; }
@@ -685,11 +764,18 @@
     log("正在打开麦克风…");
 
     navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      audio: {
+        channelCount: 1,
+        sampleRate: 16000,
+        latency: 0,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
     }).then(function (stream) {
       talk.stream = stream;
       talk.mode = "mic";
-      var ctx = new AudioContext({ sampleRate: 16000 });
+      var ctx = makeTalkContext();
       return ctx.resume().then(function () {
         talk.ctx = ctx;
         var ws = talkSocket();
@@ -718,22 +804,34 @@
     }).then(function () {
       var ctx = talk.ctx;
       var src = ctx.createMediaStreamSource(talk.stream);
-      var node = ctx.createScriptProcessor(1024, 1, 1);
       var resample = makeResampler(ctx.sampleRate, 16000);
       var sink = ctx.createGain();
       sink.gain.value = 0;
-      node.onaudioprocess = function (ev) {
-        if (!talk.live || !talk.ws || talk.ws.readyState !== 1) return;
-        var pcm = floatToPcm16(resample(ev.inputBuffer.getChannelData(0)));
-        talk.ws.send(pcm.buffer);
-      };
-      src.connect(node);
-      node.connect(sink);
-      sink.connect(ctx.destination);
-      talk.node = node;
-      talk.sink = sink;
-      setTalkUi(true, "正在喊话 · 点击结束");
-      log("麦克风已连接，开始喊话", "s");
+      return createTalkWorklet(ctx, function (samples) {
+        sendTalkChunk(samples, resample);
+      }).then(function (node) {
+        var worklet = !!node;
+        if (!node) {
+          // Fallback for browsers without AudioWorklet.
+          var size = ctx.sampleRate >= 32000 ? 512 : 256;
+          node = ctx.createScriptProcessor(size, 1, 1);
+          node.onaudioprocess = function (ev) {
+            sendTalkChunk(ev.inputBuffer.getChannelData(0), resample);
+          };
+        }
+        if (!talk.live || talk.ctx !== ctx) {
+          try { node.disconnect(); } catch (e) {}
+          return;
+        }
+        src.connect(node);
+        node.connect(sink);
+        sink.connect(ctx.destination);
+        talk.node = node;
+        talk.sink = sink;
+        talk.mode = worklet ? "worklet" : "script";
+        setTalkUi(true, "正在喊话 · 点击结束");
+        log(worklet ? "麦克风已连接（低延迟）" : "麦克风已连接", "s");
+      });
     }).catch(function (e) {
       log("麦克风不可用：" + e.message, "e");
       showMicHelp();
@@ -747,12 +845,17 @@
     if (talk.sink) { try { talk.sink.disconnect(); } catch (e) {} }
     if (talk.ctx) { try { talk.ctx.close(); } catch (e) {} }
     if (talk.stream) { talk.stream.getTracks().forEach(function (t) { t.stop(); }); }
-    if (talk.ws && talk.ws.readyState === 1) {
-      try { talk.ws.send(JSON.stringify({ cmd: "stop" })); } catch (e) {}
+    if (talk.ws) {
+      if (talk.ws.readyState === 1) {
+        try { talk.ws.send(JSON.stringify({ cmd: "stop" })); } catch (e) {}
+      }
       try { talk.ws.close(); } catch (e) {}
     }
+    if (talk.workletUrl) {
+      try { window.URL.revokeObjectURL(talk.workletUrl); } catch (e) {}
+    }
     talk.ws = null; talk.ctx = null; talk.stream = null;
-    talk.node = null; talk.sink = null; talk.mode = "";
+    talk.node = null; talk.sink = null; talk.mode = ""; talk.workletUrl = null;
     setTalkUi(false, "点击开始喊话");
     if (wasLive) log("喊话结束");
   }

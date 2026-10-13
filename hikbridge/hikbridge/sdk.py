@@ -159,6 +159,13 @@ class _VoiceEncoder:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        # Live talk must never wait for the encoder to fill an AAC frame;
+        # otherwise a 10 ms read on every input block accumulates latency.
+        try:
+            if self._proc.stdout is not None:
+                os.set_blocking(self._proc.stdout.fileno(), False)
+        except (AttributeError, OSError, ValueError):
+            pass
 
     @property
     def eof(self) -> bool:
@@ -205,9 +212,13 @@ class _VoiceEncoder:
         if ready:
             try:
                 data = os.read(self._proc.stdout.fileno(), 8192)
-            except (BlockingIOError, OSError):
+            except BlockingIOError:
+                data = None
+            except OSError:
                 data = b""
-            if data:
+            if data is None:
+                pass
+            elif data:
                 self._buffer += data
             else:
                 self._eof = True
@@ -589,11 +600,17 @@ class HikCamera:
                 raise HikError(f"StartVoiceCom failed ({self.last_error()})")
             return self._voice_handle
 
-    def talk_send(self, pcm: bytes, rate: int | None = None) -> int:
+    def talk_send(
+        self, pcm: bytes, rate: int | None = None, *,
+        pace: bool = True, read_timeout: float = 0.01,
+    ) -> int:
         """Encode PCM16 mono and push it to the camera speaker.
 
         ``pcm`` is the format used by the browser/TTS caller.  ``rate`` is its
         sample rate; the camera's advertised rate and codec are handled here.
+        Live WebSocket input already arrives in real time, so it must use
+        ``pace=False`` and a non-blocking encoder read.  Otherwise every
+        input block adds an extra 10 ms sleep and slowly builds a delay.
         """
         if not pcm:
             return 0
@@ -608,10 +625,11 @@ class HikCamera:
             self._encoder.write(pcm)
             # Read whatever ffmpeg has produced already.  This keeps a long
             # TTS clip from filling the encoder stdout pipe while we pace it.
-            self._read_encoded(0.01)
+            self._read_encoded(read_timeout)
             sent = len(pcm)
-            # Pace the caller so the camera receives roughly real-time audio.
-            time.sleep(sent / 2.0 / rate)
+            if pace:
+                # File/TTS playback is not inherently real-time, so pace it.
+                time.sleep(sent / 2.0 / rate)
             return sent
 
     def talk_stop(self) -> None:

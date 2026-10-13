@@ -49,7 +49,14 @@ function boolSetting(value: string | null | undefined, fallback = true): boolean
 }
 
 function buildTalkFfmpegArgs(input: FFmpegInput, sampleRate: number): string[] {
-    const args = ["-nostdin", "-loglevel", "error"];
+    const args = [
+        "-nostdin", "-loglevel", "error",
+        // HomeKit intercom is interactive audio. Avoid decoder/input
+        // buffering before ffmpeg converts it to the bridge's PCM format.
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-analyzeduration", "0",
+    ];
     const inputArguments = input.inputArguments?.slice() || [];
 
     if (inputArguments.length) {
@@ -73,6 +80,8 @@ function buildTalkFfmpegArgs(input: FFmpegInput, sampleRate: number): string[] {
         "-ac", "1",
         "-ar", String(sampleRate),
         "-f", "s16le",
+        "-flush_packets", "1",
+        "-avioflags", "direct",
         "-",
     );
     return args;
@@ -342,6 +351,11 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
             let settled = false;
             const ws = new WebSocket(url, headers ? { headers } : undefined);
 
+            ws.once("open", () => {
+                const socket = (ws as any)._socket;
+                socket?.setNoDelay?.(true);
+            });
+
             const finish = (callback: () => void) => {
                 if (settled)
                     return;
@@ -401,9 +415,19 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
         const state: IntercomState = { ffmpeg, ws };
         this.intercomState = state;
 
+        let backlogDropped = false;
         ffmpeg.stdout?.on("data", (chunk: Buffer) => {
             if (this.intercomState !== state || ws.readyState !== WebSocket.OPEN)
                 return;
+            // Never let a slow bridge turn talkback into a growing delay.
+            if (ws.bufferedAmount > 32 * 1024) {
+                if (!backlogDropped) {
+                    this.console.warn("dropping stale talkback audio; bridge is behind");
+                    backlogDropped = true;
+                }
+                return;
+            }
+            backlogDropped = false;
             try {
                 ws.send(chunk);
             }

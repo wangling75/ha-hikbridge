@@ -30,6 +30,7 @@ import logging
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -430,6 +431,15 @@ def _handler(state: _State):
                 _LOGGER.debug("talk handshake failed: %s", exc)
                 return
 
+            # Interactive audio consists of many small packets; disabling
+            # Nagle avoids adding tens of milliseconds at the start of talk.
+            try:
+                self.connection.setsockopt(
+                    socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
+                )
+            except OSError:
+                pass
+
             with entry.lock:
                 busy = entry.talking
                 if not busy:
@@ -473,7 +483,9 @@ def _handler(state: _State):
                     if len(payload) > _MAX_TALK_FRAME:
                         _LOGGER.debug("dropping oversized talk frame (%d bytes)", len(payload))
                         continue
-                    entry.camera.talk_send(payload, rate)
+                    entry.camera.talk_send(
+                        payload, rate, pace=False, read_timeout=0.0
+                    )
                     frames += 1
             except (WebSocketError, HikError, OSError) as exc:
                 _LOGGER.info("talk session for %s ended: %s", entry.id, exc)

@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.9
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.10
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.9
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.9 ./hikbridge
+docker build -t hikbridge:0.2.10 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -178,7 +178,7 @@ docker run -d \
   -p 8654:8654 \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.9
+  ghcr.io/wangling75/amd64-hikbridge:0.2.10
 ```
 
 查看日志：
