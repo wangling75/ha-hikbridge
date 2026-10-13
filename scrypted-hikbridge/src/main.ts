@@ -269,7 +269,7 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
         this.storage.setItem(key, value === undefined || value === null ? "" : String(value));
 
         if (key === "intercomEnabled" || key === "audioEnabled")
-            await this.provider.updateDevice(this.nativeId!, this.provider.getDeviceName(this.nativeId!));
+            await this.provider.updateDevice(this.nativeId!);
 
         await this.onDeviceEvent(ScryptedInterface.Settings, undefined);
     }
@@ -541,6 +541,19 @@ class HikBridgeProvider extends ScryptedDeviceBase implements DeviceProvider, De
         const camera = this.getOrCreate(nativeId);
         const name = asString(settings.newCamera) || "Hikvision Camera";
 
+        // Scrypted does not allocate device storage until the provider has announced
+        // the native id. Register the base camera interfaces before writing settings.
+        await deviceManager.onDeviceDiscovered({
+            nativeId,
+            name,
+            type: ScryptedDeviceType.Camera,
+            interfaces: [
+                ScryptedInterface.Camera,
+                ScryptedInterface.VideoCamera,
+                ScryptedInterface.Settings,
+            ],
+        });
+
         const values: Array<[string, SettingValue | undefined]> = [
             ["rtspUrl", settings.rtspUrl],
             ["bridgeCameraId", settings.bridgeCameraId],
@@ -581,12 +594,14 @@ class HikBridgeProvider extends ScryptedDeviceBase implements DeviceProvider, De
             || "Hikvision Camera";
     }
 
-    async updateDevice(nativeId: string, name: string): Promise<void> {
+    async updateDevice(nativeId: string, name?: string): Promise<void> {
         const camera = this.getOrCreate(nativeId);
-        this.names.set(nativeId, name);
+        if (name)
+            this.names.set(nativeId, name);
+
         await deviceManager.onDeviceDiscovered({
             nativeId,
-            name,
+            name: name || this.names.get(nativeId) || camera.name || "Hikvision Camera",
             type: ScryptedDeviceType.Camera,
             interfaces: camera.getProvidedInterfaces(),
         });
