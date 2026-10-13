@@ -12,6 +12,13 @@
           "tts_entity": "TTS entity",
           "nudge_seconds": "Button nudge duration"
         }
+      },
+      "camera": {
+        "title": "Choose a camera",
+        "description": "The add-on is driving more than one camera. Pick the one this entry should control. Add the integration again for the others.",
+        "data": {
+          "camera_id": "Camera"
+        }
       }
     },
     "error": {
@@ -34,6 +41,12 @@
           "rtsp_url": "RTSP URL",
           "tts_entity": "TTS entity",
           "nudge_seconds": "Button nudge duration"
+        }
+      },
+      "camera": {
+        "title": "Choose a camera",
+        "data": {
+          "camera_id": "Camera"
         }
       }
     }

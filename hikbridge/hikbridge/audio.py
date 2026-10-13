@@ -12,11 +12,14 @@ class AudioError(ValueError):
 
 def decode_wav(data: bytes) -> tuple[bytes, int, int]:
     """Return (pcm16le, sample_rate, channels) from WAV bytes."""
-    with wave.open(io.BytesIO(data), "rb") as wf:
-        channels = wf.getnchannels()
-        width = wf.getsampwidth()
-        rate = wf.getframerate()
-        frames = wf.readframes(wf.getnframes())
+    try:
+        with wave.open(io.BytesIO(data), "rb") as wf:
+            channels = wf.getnchannels()
+            width = wf.getsampwidth()
+            rate = wf.getframerate()
+            frames = wf.readframes(wf.getnframes())
+    except (wave.Error, EOFError, struct.error) as exc:
+        raise AudioError(f"invalid WAV data: {exc}") from exc
     if width == 1:
         # 8-bit WAV is unsigned; convert to signed 16-bit
         pcm = struct.pack(f"<{len(frames)}h", *[(b - 128) << 8 for b in frames])
@@ -68,4 +71,7 @@ def resample(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
 def prepare_wav(data: bytes, target_rate: int) -> bytes:
     """Decode WAV bytes to 16-bit mono PCM at target_rate."""
     pcm, rate, channels = decode_wav(data)
-    return resample(to_mono(pcm, channels), rate, target_rate)
+    try:
+        return resample(to_mono(pcm, channels), rate, target_rate)
+    except (struct.error, ValueError) as exc:
+        raise AudioError(f"unsupported WAV layout: {exc}") from exc

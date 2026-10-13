@@ -1,35 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OPTIONS=/data/options.json
+# The add-on reads /data/options.json directly (single camera or a camera
+# list). These variables only provide fallbacks for manual `docker run` use.
+export HIK_OPTIONS_FILE="${HIK_OPTIONS_FILE:-/data/options.json}"
+export HIK_SDK_DIR="${HIK_SDK_DIR:-/opt/hikbridge/hcnetsdk}"
+export HIK_LISTEN="${HIK_LISTEN:-0.0.0.0}"
+export HIK_LISTEN_PORT="${HIK_LISTEN_PORT:-8654}"
 
-read_opt() {
-    python3 - "$1" <<'PY'
-import json, sys
-with open('/data/options.json') as fh:
-    data = json.load(fh)
-print(data.get(sys.argv[1], '') or '')
-PY
-}
-
-CAMERA_IP=$(read_opt camera_ip)
-CAMERA_PORT=$(read_opt camera_port)
-USERNAME=$(read_opt username)
-PASSWORD=$(read_opt password)
-CHANNEL=$(read_opt channel)
-SPEAK_RATE=$(read_opt speak_sample_rate)
-TOKEN=$(read_opt auth_token)
-
-export HIK_IP="$CAMERA_IP"
-export HIK_PORT="${CAMERA_PORT:-8000}"
-export HIK_USER="${USERNAME:-admin}"
-export HIK_PASSWORD="$PASSWORD"
-export HIK_CHANNEL="${CHANNEL:-1}"
-export HIK_SPEAK_RATE="${SPEAK_RATE:-16000}"
-export HIK_TOKEN="$TOKEN"
-export HIK_LISTEN="0.0.0.0"
-export HIK_LISTEN_PORT="8654"
-export HIK_SDK_DIR="/opt/hikbridge/hcnetsdk"
-
-echo "hikbridge: camera ${HIK_IP}:${HIK_PORT} channel ${HIK_CHANNEL}"
+echo "hikbridge: starting, options from ${HIK_OPTIONS_FILE}"
 exec python3 -m hikbridge --verbose

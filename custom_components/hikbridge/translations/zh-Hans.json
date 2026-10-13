@@ -12,6 +12,13 @@
           "tts_entity": "TTS 实体",
           "nudge_seconds": "按钮点动时长"
         }
+      },
+      "camera": {
+        "title": "选择摄像头",
+        "description": "插件正在驱动多台摄像头，请选择本条目要控制的那一台。其他摄像头可以再次添加本集成。",
+        "data": {
+          "camera_id": "摄像头"
+        }
       }
     },
     "error": {
@@ -34,6 +41,12 @@
           "rtsp_url": "RTSP 地址",
           "tts_entity": "TTS 实体",
           "nudge_seconds": "按钮点动时长"
+        }
+      },
+      "camera": {
+        "title": "选择摄像头",
+        "data": {
+          "camera_id": "摄像头"
         }
       }
     }

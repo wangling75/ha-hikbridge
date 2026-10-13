@@ -1,6 +1,8 @@
 """Hikvision PTZ Bridge integration.
 
-Talks to the `hikbridge` add-on, which owns the vendor HCNetSDK session.
+Talks to the `hikbridge` add-on, which owns the vendor HCNetSDK session. One
+config entry drives one camera on the bridge; add the integration again (same
+host/port, different camera) to expose a second camera.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .api import HikBridgeAuthError, HikBridgeClient, HikBridgeError
 from .const import (
+    CONF_CAMERA_ID,
     CONF_HOST,
     CONF_PORT,
     CONF_TOKEN,
@@ -36,7 +39,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CAMERA, Platform.BUTTON]
+PLATFORMS = [Platform.CAMERA, Platform.BUTTON, Platform.MEDIA_PLAYER]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -73,7 +76,33 @@ def build_client(hass: HomeAssistant, entry: ConfigEntry) -> HikBridgeClient:
         data[CONF_HOST],
         data.get(CONF_PORT, DEFAULT_PORT),
         data.get(CONF_TOKEN),
+        data.get(CONF_CAMERA_ID),
     )
+
+
+def select_camera(info: dict, camera_id: str | None) -> dict:
+    """Pick the camera described by this config entry.
+
+    Older add-on versions do not return a camera list at all, in which case
+    everything falls back to the top level serial/device of /health.
+    """
+    cameras = info.get("cameras") or []
+    if camera_id:
+        for camera in cameras:
+            if str(camera.get("id")) == str(camera_id):
+                return dict(camera)
+    if cameras:
+        return dict(cameras[0])
+    return {
+        "id": camera_id,
+        "name": None,
+        "serial": info.get("serial"),
+        "device": info.get("device") or {},
+    }
+
+
+def entry_camera(hass: HomeAssistant, entry_id: str) -> dict:
+    return hass.data.get(DOMAIN, {}).get(entry_id, {}).get("camera") or {}
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -82,6 +111,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    data = _entry_data(hass, entry)
     client = build_client(hass, entry)
     try:
         info = await client.health()
@@ -92,14 +122,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             f"cannot reach the hikbridge add-on: {exc}"
         ) from exc
 
+    camera = select_camera(info, data.get(CONF_CAMERA_ID))
     _LOGGER.info(
-        "hikbridge connected: serial=%s version=%s",
-        info.get("serial"), info.get("version"),
+        "hikbridge connected: camera=%s serial=%s version=%s",
+        camera.get("id") or "(legacy)", camera.get("serial"), info.get("version"),
     )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "client": client,
         "info": info,
+        "camera": camera,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -128,12 +160,12 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 # ---------------------------------------------------------------------------
 # services
 # ---------------------------------------------------------------------------
-def _clients_for_call(hass: HomeAssistant, call: ServiceCall) -> list[HikBridgeClient]:
+async def _clients_for_call(hass: HomeAssistant, call: ServiceCall) -> list[HikBridgeClient]:
     entries = hass.data.get(DOMAIN, {})
     if not entries:
         raise HomeAssistantError("no hikbridge camera is configured")
     try:
-        target_ids = async_extract_config_entry_ids(hass, call)
+        target_ids = await async_extract_config_entry_ids(hass, call)
     except Exception:  # noqa: BLE001 - targeting is optional
         target_ids = set()
     if target_ids:
@@ -154,8 +186,16 @@ async def _tts_to_wav(hass: HomeAssistant, text: str, entity_id: str,
                       language: str | None) -> bytes:
     from homeassistant.components import tts
 
-    engine = tts.async_get_engine(hass, entity_id)
-    extension, data = await engine.async_get_tts_audio(text, language, {})
+    options = {
+        tts.ATTR_PREFERRED_FORMAT: "wav",
+        tts.ATTR_PREFERRED_SAMPLE_RATE: 16000,
+        tts.ATTR_PREFERRED_SAMPLE_CHANNELS: 1,
+        tts.ATTR_PREFERRED_SAMPLE_BYTES: 2,
+    }
+    stream = tts.async_create_stream(hass, entity_id, language, options)
+    stream.async_set_message(text)
+    data = b"".join([chunk async for chunk in stream.async_stream_result()])
+    extension = stream.extension
     if not data:
         raise HomeAssistantError(f"{entity_id} returned no audio")
     if extension == "wav":
@@ -187,11 +227,11 @@ async def _convert_audio(hass: HomeAssistant, data: bytes, extension: str) -> by
 
 def _async_register_services(hass: HomeAssistant) -> None:
     async def handle_move(call: ServiceCall) -> None:
-        for client in _clients_for_call(hass, call):
+        for client in await _clients_for_call(hass, call):
             await client.ptz(call.data["direction"], call.data["duration"])
 
     async def handle_stop(call: ServiceCall) -> None:
-        for client in _clients_for_call(hass, call):
+        for client in await _clients_for_call(hass, call):
             await client.stop()
 
     async def handle_speak(call: ServiceCall) -> None:
@@ -218,7 +258,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 hass, text, entity_id, call.data.get("language")
             )
 
-        for client in _clients_for_call(hass, call):
+        for client in await _clients_for_call(hass, call):
             await client.speak_wav(wav)
 
     hass.services.async_register(DOMAIN, SERVICE_MOVE, handle_move, schema=MOVE_SCHEMA)
