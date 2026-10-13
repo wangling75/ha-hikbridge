@@ -1,6 +1,6 @@
 {
   "name": "@wangling75/scrypted-hikbridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Scrypted camera provider for Hikvision / EZVIZ cameras using the Hikvision PTZ Bridge add-on for two-way audio.",
   "author": "wangling75",
   "license": "MIT",

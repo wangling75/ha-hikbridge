@@ -28,6 +28,7 @@ const { deviceManager, mediaManager } = sdk;
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8654";
 const DEFAULT_TALK_RATE = 16000;
 const DEFAULT_RTSP_TRANSPORT = "tcp";
+const DEFAULT_VIDEO_CODEC = "h264";
 const TALK_CONNECT_TIMEOUT_MS = 5000;
 
 type IntercomState = {
@@ -123,12 +124,20 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
         return Math.round(value);
     }
 
+    private get videoCodec(): string {
+        const value = (this.storage.getItem("videoCodec") || DEFAULT_VIDEO_CODEC).toLowerCase();
+        return value === "h265" || value === "hevc" ? "h265" : "h264";
+    }
+
     private get streamOptions(): ResponseMediaStreamOptions {
         const stream: ResponseMediaStreamOptions = {
             id: "main",
             name: "Main",
             container: "rtsp",
-            video: {},
+            // Scrypted uses this hint instead of probing, and it must match
+            // what the camera really sends or the HomeKit plugin can pick the
+            // wrong transcode path.
+            video: { codec: this.videoCodec },
         };
         if (this.audioEnabled)
             stream.audio = {};
@@ -262,6 +271,16 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
                 group: "Hikvision / EZVIZ Bridge",
                 subgroup: "Camera",
             },
+            {
+                key: "videoCodec",
+                title: "Video codec hint",
+                type: "string",
+                choices: ["h264", "h265"],
+                value: this.videoCodec,
+                description: "Codec of the RTSP stream above. Must match the camera: h264 for the 207 main stream, h265 for its sub stream.",
+                group: "Hikvision / EZVIZ Bridge",
+                subgroup: "Camera",
+            },
         ];
     }
 
@@ -270,6 +289,9 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
 
         if (key === "intercomEnabled" || key === "audioEnabled")
             await this.provider.updateDevice(this.nativeId!);
+
+        if (key === "videoCodec" || key === "rtspUrl" || key === "rtspTransport")
+            await this.onDeviceEvent(ScryptedInterface.VideoCamera, undefined);
 
         await this.onDeviceEvent(ScryptedInterface.Settings, undefined);
     }
@@ -301,10 +323,12 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
         const rtspUrl = this.requireRtspUrl();
         const selected = options?.id && options.id !== "main" ? this.streamOptions : this.streamOptions;
         const ffmpegInput: FFmpegInput = {
-            inputArguments: [
-                "-rtsp_transport", this.rtspTransport,
-                "-i", rtspUrl,
-            ],
+            // `url` is what Scrypted's prebuffer resolves. Without it the
+            // prebuffer session dies with "Invalid URL" and HomeKit playback
+            // stutters. Scrypted appends `-i <url>` itself, so the input
+            // arguments here must not contain `-i`.
+            url: rtspUrl,
+            inputArguments: ["-rtsp_transport", this.rtspTransport],
             mediaStreamOptions: selected,
         };
         return mediaManager.createFFmpegMediaObject(ffmpegInput, { sourceId: this.id });
@@ -533,6 +557,14 @@ class HikBridgeProvider extends ScryptedDeviceBase implements DeviceProvider, De
                 choices: ["tcp", "udp"],
                 value: DEFAULT_RTSP_TRANSPORT,
             },
+            {
+                key: "videoCodec",
+                title: "Video codec hint",
+                type: "string",
+                choices: ["h264", "h265"],
+                value: DEFAULT_VIDEO_CODEC,
+                description: "Codec of the RTSP stream above. The 207 main stream is h264; its sub stream is h265.",
+            },
         ];
     }
 
@@ -563,6 +595,7 @@ class HikBridgeProvider extends ScryptedDeviceBase implements DeviceProvider, De
             ["intercomEnabled", settings.intercomEnabled],
             ["talkSampleRate", settings.talkSampleRate],
             ["rtspTransport", settings.rtspTransport],
+            ["videoCodec", settings.videoCodec],
         ];
         for (const [key, value] of values) {
             const text = asString(value);
