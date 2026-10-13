@@ -29,6 +29,8 @@ import sys
 import time
 import urllib.request
 
+import hikbridge  # absolute self-import: publishes the timezone status
+
 from .server import CameraEntry, serve
 from .sdk import HikCamera
 
@@ -42,8 +44,6 @@ def _apply_host_timezone() -> None:
     off on a UTC+8 host. Supervisor exposes the configured zone over its own
     API, and TZ has to be set before the first log record is formatted.
     """
-    if os.environ.get("TZ"):
-        return
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:
         return
@@ -61,14 +61,18 @@ def _apply_host_timezone() -> None:
         zone = body.get("timezone")
     except Exception as exc:  # noqa: BLE001 - the timezone is cosmetic
         print(f"hikbridge: cannot read the host timezone: {exc}", file=sys.stderr)
+        hikbridge.timezone_status = f"lookup failed: {exc}"
         return
     if not zone:
+        hikbridge.timezone_status = "host did not report a timezone"
         return
     os.environ["TZ"] = str(zone)
     try:
         time.tzset()
     except AttributeError:  # pragma: no cover - Windows only
         pass
+    hikbridge.timezone_status = str(zone)
+    print(f"hikbridge: timezone set to {zone}", file=sys.stderr)
 
 
 def _read_options(path: str | None) -> dict:

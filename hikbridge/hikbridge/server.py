@@ -31,6 +31,8 @@ import secrets
 import tempfile
 import threading
 import time
+
+import hikbridge  # absolute self-import: reads the live timezone status
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
@@ -192,6 +194,7 @@ def _handler(state: _State):
                         "ok": True,
                         "version": __version__,
                         "timezone": os.environ.get("TZ") or time.tzname[0],
+                        "timezone_status": hikbridge.timezone_status,
                         "serial": default.camera.serial,
                         "device": default.camera.device,
                         "cameras": state.info_list(),
