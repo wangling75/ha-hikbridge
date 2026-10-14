@@ -369,6 +369,9 @@ def _handler(state: _State):
             # keyframe interval remains conservative for bandwidth.
             command = [
                 "ffmpeg", "-hide_banner", "-loglevel", "warning",
+                # Keep the RTSP input close to real time. The previous defaults
+                # could spend several seconds probing before the first frame.
+                "-analyzeduration", "500000", "-probesize", "500000",
                 "-rtsp_transport", "tcp", "-i", entry.rtsp_url,
                 "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",

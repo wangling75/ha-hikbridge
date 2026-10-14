@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The add-on reads /data/options.json directly (single camera or a camera
-# list). These variables only provide fallbacks for manual `docker run` use.
+# The add-on reads the camera list from /data/options.json. These variables
+# only provide fallbacks for manual `docker run` use.
 export HIK_OPTIONS_FILE="${HIK_OPTIONS_FILE:-/data/options.json}"
 export HIK_SDK_DIR="${HIK_SDK_DIR:-/opt/hikbridge/hcnetsdk}"
 export HIK_LISTEN="${HIK_LISTEN:-0.0.0.0}"

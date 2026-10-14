@@ -1,6 +1,6 @@
 services:
   hikbridge:
-    image: ghcr.io/wangling75/amd64-hikbridge:0.2.5
+    image: ghcr.io/wangling75/amd64-hikbridge:0.2.13
     container_name: hikbridge
     restart: unless-stopped
     ports:

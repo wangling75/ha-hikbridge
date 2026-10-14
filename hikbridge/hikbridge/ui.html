@@ -561,9 +561,13 @@
     var source = new MS();
     liveState.source = source;
     liveState.objectUrl = URL.createObjectURL(source);
+    source.addEventListener("sourceopen", openSource);
     live.src = liveState.objectUrl;
     live.style.display = "block";
-    snap.style.display = "none";
+    // Keep the latest snapshot visible while ffmpeg negotiates RTSP and
+    // waits for the first decodable frame; the video is revealed on play.
+    snapMsg.textContent = "正在连接实时画面…";
+    snapMsg.classList.remove("hide");
     live.muted = true;
     liveState.active = true;
     setLiveUi(true);
@@ -581,7 +585,7 @@
       soundToggle.disabled = false;
       live.play().catch(function () {});
     });
-    source.addEventListener("sourceopen", function () {
+    function openSource() {
       if (!liveState.active || liveState.source !== source) return;
       var mime = liveMime();
       if (!mime) { failLive(new Error("浏览器不支持 MP4/AAC")); return; }
@@ -613,7 +617,7 @@
       }).catch(function (e) {
         if (e.name !== "AbortError") failLive(e);
       });
-    });
+    }
   }
 
   liveToggle.addEventListener("click", function () {
@@ -634,6 +638,7 @@
     }).catch(function (e) { log("声音开启失败：" + e.message, "e"); });
   });
   live.addEventListener("playing", function () {
+    snap.style.display = "none";
     snapMsg.classList.add("hide");
     setStatus(true, "实时画面");
   });

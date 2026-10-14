@@ -99,8 +99,8 @@ the button starts working. The plain HTTP listener stays on `8654`, so the
 Home Assistant ingress panel plus the `speak` and `/talk` endpoints used by
 Scrypted keep working unchanged.
 
-The legacy single-camera keys (`camera_ip`, `camera_port`, `username`,
-`password`, `channel`) still work and are used when `cameras` is empty.
+`cameras` is required and must contain at least one entry. The top-level
+single-camera keys from older releases are no longer accepted.
 
 ## API
 

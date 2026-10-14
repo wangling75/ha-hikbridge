@@ -1,7 +1,7 @@
 """Command line entry point for the hikbridge add-on.
 
 Inside the add-on the configuration comes from /data/options.json, which may
-describe one camera (legacy keys) or a list of cameras:
+describe a list of cameras:
 
     {
       "cameras": [
@@ -15,8 +15,8 @@ describe one camera (legacy keys) or a list of cameras:
       "auth_token": ""
     }
 
-The old single-camera keys (camera_ip, username, ...) and the command line
-flags still work, so an existing install keeps running after the update.
+The add-on no longer accepts top-level single-camera keys. A non-empty
+"cameras" list is required.
 """
 from __future__ import annotations
 
@@ -146,28 +146,6 @@ def _build_cameras(options: dict, args: argparse.Namespace) -> list[CameraEntry]
                 if entry is not None:
                     entries.append(entry)
 
-    if not entries and _clean(options.get("camera_ip")):
-        entry = _camera_entry(options, 0, sdk_dir, speak_rate)
-        if entry is not None:
-            entries.append(entry)
-
-    if not entries:
-        entry = _camera_entry(
-            {
-                "id": "cam1",
-                "name": args.ip,
-                "camera_ip": args.ip,
-                "camera_port": args.port,
-                "username": args.user,
-                "password": args.password,
-                "channel": args.channel,
-                "rtsp_url": args.rtsp_url,
-            },
-            0, sdk_dir, speak_rate,
-        )
-        if entry is not None:
-            entries.append(entry)
-
     # Keep ids unique so the URL routing stays unambiguous.
     seen: set[str] = set()
     for entry in entries:
@@ -186,12 +164,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--options-file",
                         default=os.environ.get("HIK_OPTIONS_FILE", "/data/options.json"),
                         help="Home Assistant add-on options file")
-    parser.add_argument("--ip", default=os.environ.get("HIK_IP", "192.168.2.207"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("HIK_PORT", 8000)))
-    parser.add_argument("--user", default=os.environ.get("HIK_USER", "admin"))
-    parser.add_argument("--password", default=os.environ.get("HIK_PASSWORD", ""))
-    parser.add_argument("--channel", type=int, default=int(os.environ.get("HIK_CHANNEL", 1)))
-    parser.add_argument("--rtsp-url", default=os.environ.get("HIK_RTSP_URL"))
     parser.add_argument("--sdk-dir", default=os.environ.get("HIK_SDK_DIR"))
     parser.add_argument("--speak-rate", type=int,
                         default=int(os.environ.get("HIK_SPEAK_RATE", 16000)))
