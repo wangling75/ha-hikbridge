@@ -34,9 +34,16 @@ jobs:
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Copy the pre-07:00 rollback image into a newer version tag
+        if: steps.version.outputs.version == '0.2.24'
+        run: |
+          docker buildx imagetools create \
+            --tag ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:0.2.24 \
+            ghcr.io/${{ github.repository_owner }}/amd64-hikbridge:0.2.9
+
       - name: Build and push
-        # Keep the pre-07:00 rollback image intact while the add-on is pinned to 0.2.9.
-        if: steps.version.outputs.version != '0.2.9'
+        # Never rebuild the pinned rollback tags; future versions build normally.
+        if: steps.version.outputs.version != '0.2.9' && steps.version.outputs.version != '0.2.24'
         uses: docker/build-push-action@v6
         with:
           context: ./hikbridge
