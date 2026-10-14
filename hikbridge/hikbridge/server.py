@@ -263,8 +263,13 @@ def _handler(state: _State):
                         "timezone_status": hikbridge.timezone_status,
                         "https_port": state.https_port,
                         "webrtc": bool(state.webrtc and state.webrtc.available),
+                        # "home_assistant" means the plugin reused HA's own
+                        # go2rtc, so no plugin port has to be reachable.
+                        "webrtc_backend": (
+                            state.webrtc.backend if state.webrtc else None
+                        ),
                         "webrtc_port": (
-                            state.webrtc.media_port
+                            state.webrtc.advertise_port
                             if state.webrtc and state.webrtc.available else None
                         ),
                         "webrtc_candidates": (

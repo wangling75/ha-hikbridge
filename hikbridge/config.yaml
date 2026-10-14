@@ -1,5 +1,5 @@
 name: "Hikvision PTZ Bridge"
-version: "0.2.20"
+version: "0.2.21"
 slug: "hikbridge"
 description: "PTZ control, snapshots, live two-way talk and speaker playback for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
 url: "https://github.com/wangling75/ha-hikbridge"
@@ -33,8 +33,19 @@ options:
   # Keep these separate from HA's own go2rtc (usually 1984/8555).
   # The internal RTSP relay also uses an ephemeral loopback port, so it
   # never takes HA's 8554.
+  # "auto" reuses the go2rtc that Home Assistant already runs, so the
+  # plugin exposes no WebRTC port of its own: the browser only needs to
+  # reach Home Assistant. Media uses HA's WebRTC port when it is
+  # reachable and the same-origin MSE fallback (through HA ingress)
+  # otherwise. Set "bundled" to force the add-on's own go2rtc, which is
+  # what a plain Docker deployment maps.
+  webrtc_backend: auto
+  # Loopback API of Home Assistant's built-in go2rtc and the TCP port its
+  # WebRTC listener advertises (HA's own defaults).
+  ha_go2rtc_api: "http://127.0.0.1:11984"
+  ha_webrtc_port: 18555
   webrtc_port: 18554
-  webrtc_api_port: 11984
+  webrtc_api_port: 11985
   webrtc_candidates: []
   # STUN is enough for LAN and many port-forwarded homes. For a remote
   # browser that cannot receive direct UDP/TCP, add a TURN URL below.
@@ -58,6 +69,9 @@ schema:
   certfile: str?
   keyfile: str?
   webrtc: bool?
+  webrtc_backend: list(auto|bundled|home_assistant)?
+  ha_go2rtc_api: url?
+  ha_webrtc_port: port?
   webrtc_port: port?
   webrtc_api_port: port?
   webrtc_candidates:

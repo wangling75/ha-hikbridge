@@ -23,8 +23,11 @@
   "speak_sample_rate": "16000",
   "auth_token": "CHANGE_ME_TOKEN",
   "webrtc": true,
+  "webrtc_backend": "auto",
+  "ha_go2rtc_api": "http://127.0.0.1:11984",
+  "ha_webrtc_port": 18555,
   "webrtc_port": 18554,
-  "webrtc_api_port": 11984,
+  "webrtc_api_port": 11985,
   "webrtc_candidates": [],
   "webrtc_ice_servers": [
     "stun:stun.cloudflare.com:3478",

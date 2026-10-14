@@ -4,6 +4,18 @@ go2rtc is deliberately kept on a loopback API port.  The Hikbridge HTTP
 server proxies only the SDP exchange, so the browser never gets an
 unauthenticated management API.  WebRTC media itself uses the normal
 go2rtc UDP/TCP listener on the LAN.
+
+Two backends are supported:
+
+* ``bundled`` - the add-on starts the go2rtc binary from its own image and
+  binds a dedicated media port.  This is the only option outside Home
+  Assistant (plain Docker), where the operator forwards that port.
+* ``home_assistant`` - Home Assistant already runs its own go2rtc (API on
+  127.0.0.1:11984, WebRTC on :18555/tcp).  The add-on registers its
+  cameras there and reuses the SDP exchange, so no extra plugin port is
+  ever exposed.  This mirrors how the HA WebRTC camera card works: media
+  uses HA's own WebRTC port when it is reachable and the MSE fallback
+  keeps working through the HA HTTP port (ingress) when it is not.
 """
 from __future__ import annotations
 
@@ -22,6 +34,15 @@ import urllib.parse
 import urllib.request
 
 _LOGGER = logging.getLogger("hikbridge.go2rtc")
+
+# Home Assistant's built-in go2rtc instance.  HA writes a temporary config
+# with these listeners, so the add-on can reuse them without binding
+# anything of its own:
+#   api:   127.0.0.1:11984  (loopback only)
+#   rtsp:  127.0.0.1:18554
+#   webrtc: :18555/tcp
+HA_GO2RTC_API = "http://127.0.0.1:11984"
+HA_GO2RTC_WEBRTC_PORT = 18555
 
 _DEFAULT_ICE_SERVERS = [
     "stun:stun.cloudflare.com:3478",
@@ -91,7 +112,9 @@ class Go2RTCManager:
     def __init__(self, cameras, binary: str | None = None,
                  api_port: int = 11984, media_port: int = 18554,
                  candidates: list[str] | None = None,
-                 ice_servers: list[str] | None = None) -> None:
+                 ice_servers: list[str] | None = None,
+                 external_api: str | None = None,
+                 advertise_port: int | None = None) -> None:
         self.cameras = [entry for entry in cameras if entry.rtsp_url]
         self.binary = (
             binary
@@ -104,6 +127,17 @@ class Go2RTCManager:
         self.candidates = [
             str(value).strip() for value in (candidates or []) if str(value).strip()
         ]
+        # When set, the add-on does not start its own go2rtc: it registers
+        # the cameras with an already running instance (Home Assistant's)
+        # and only proxies the SDP exchange.
+        self.external_api = str(external_api).rstrip("/") if external_api else None
+        self.advertise_port = int(advertise_port or media_port)
+        self.backend = "home_assistant" if self.external_api else "bundled"
+        self._registered = False
+        # Cameras with an audio codec get a second, Opus-only source so
+        # browsers can hear them inside WebRTC.  If that source turns out
+        # to be unusable the exchange retries video-only.
+        self._audio_sources = True
         selected_ice_servers = (
             _DEFAULT_ICE_SERVERS if ice_servers is None else ice_servers
         )
@@ -132,7 +166,8 @@ class Go2RTCManager:
             "enabled": self.configured,
             "available": self.available,
             "error": self.error,
-            "port": self.media_port if self.available else None,
+            "backend": self.backend,
+            "port": self.advertise_port if self.available else None,
             "candidates": list(self.candidates),
             "ice_ips": list(self.ice_ips),
             "ice_servers": list(self.ice_servers),
@@ -145,6 +180,8 @@ class Go2RTCManager:
             return False
         if self.available:
             return True
+        if self.external_api:
+            return self._start_external()
         if not self.binary or not os.path.isfile(self.binary):
             self.error = f"go2rtc binary not found: {self.binary}"
             _LOGGER.warning("WebRTC disabled: %s", self.error)
@@ -227,8 +264,123 @@ class Go2RTCManager:
         self.stop()
         return False
 
+    def _start_external(self) -> bool:
+        """Reuse the go2rtc that Home Assistant already runs.
+
+        Nothing is started here.  The cameras are published as
+        ``hikbridge-<id>`` streams through the loopback REST API and the SDP
+        exchange is proxied exactly like the bundled backend.  Streams live
+        in go2rtc memory only, so they are re-registered on demand after a
+        Home Assistant restart.
+        """
+        try:
+            info = json.loads(self._request("GET", "/api", timeout=3.0))
+        except (Go2RTCError, ValueError) as exc:
+            self.error = f"Home Assistant go2rtc API unavailable at {self.external_api}: {exc}"
+            _LOGGER.info("WebRTC gateway not reused: %s", self.error)
+            return False
+        if not isinstance(info, dict) or not info.get("version"):
+            self.error = (
+                f"{self.external_api} does not look like a go2rtc API"
+            )
+            _LOGGER.info("WebRTC gateway not reused: %s", self.error)
+            return False
+
+        try:
+            missing = self._register_external_streams()
+        except Go2RTCError as exc:
+            self.error = f"cannot publish cameras to the HA go2rtc: {exc}"
+            _LOGGER.warning("WebRTC disabled: %s", self.error)
+            return False
+        if missing:
+            self.error = (
+                "the HA go2rtc did not accept the camera streams: "
+                + ", ".join(sorted(missing))
+            )
+            _LOGGER.warning("WebRTC disabled: %s", self.error)
+            return False
+
+        self.available = True
+        self.error = None
+        self._registered = True
+        _LOGGER.info(
+            "Reusing the Home Assistant go2rtc at %s (version %s, WebRTC TCP %s)",
+            self.external_api, info.get("version"), self.advertise_port,
+        )
+        _LOGGER.info(
+            "WebRTC streams registered: %s", ", ".join(sorted(self._names))
+        )
+        return True
+
+    def _register_external_streams(self, force: bool = False) -> set[str]:
+        """Publish every camera in the external go2rtc, then verify.
+
+        Returns the names go2rtc still does not know about.  A PUT can answer
+        with an error while the stream was in fact created (go2rtc reports a
+        failed config write that way), so the stream list is the source of
+        truth.
+
+        ``force`` re-publishes the sources even when the name already exists,
+        which go2rtc replaces wholesale.
+        """
+        streams = self._external_streams()
+        for name in self._names:
+            if name in streams and not force:
+                continue
+            query = [("name", name)]
+            query += [
+                ("src", source)
+                for source in self._sources(name, with_audio=self._audio_sources)
+            ]
+            path = "/api/streams?" + urllib.parse.urlencode(query)
+            try:
+                self._request("PUT", path, timeout=6.0)
+            except Go2RTCError as exc:
+                _LOGGER.debug("go2rtc PUT %s answered: %s", name, exc)
+        streams = self._external_streams()
+        return {name for name in self._names if name not in streams}
+
+    def _external_streams(self) -> set[str]:
+        payload = json.loads(self._request("GET", "/api/streams", timeout=5.0))
+        if not isinstance(payload, dict):
+            raise Go2RTCError("go2rtc returned an unexpected stream list")
+        return {str(name) for name in payload}
+
+    def _sources(self, name: str, with_audio: bool = True) -> list[str]:
+        """Return the go2rtc sources for one camera.
+
+        The transport stays on TCP for the same reason the MSE path uses it:
+        packet loss on Wi-Fi otherwise shows up as frozen video.  A second
+        source transcodes only the audio to Opus because browsers cannot
+        decode the camera's AAC inside WebRTC.
+
+        go2rtc reads ``#transport=tcp`` correctly from a config file, but a
+        source registered through the REST API mangles the fragment, so
+        API-registered streams stay on the plain URL.  go2rtc's RTSP client
+        already uses TCP interleaving by default, so nothing is lost.
+        """
+        entry = self._names[name]
+        url = str(entry.rtsp_url)
+        if "#" not in url and not self.external_api:
+            url += "#transport=tcp"
+        sources = [url]
+        if with_audio and getattr(entry.camera, "audio_codec", None):
+            sources.append(f"ffmpeg:{name}#audio=opus")
+        return sources
+
     def stop(self) -> None:
         self.available = False
+        if self.external_api and self._registered:
+            self._registered = False
+            for name in self._names:
+                try:
+                    self._request(
+                        "DELETE",
+                        "/api/streams?" + urllib.parse.urlencode({"src": name}),
+                        timeout=3.0,
+                    )
+                except Go2RTCError as exc:
+                    _LOGGER.debug("cannot remove go2rtc stream %s: %s", name, exc)
         proc = self._proc
         self._proc = None
         if proc is not None:
@@ -245,10 +397,42 @@ class Go2RTCManager:
     def exchange(self, entry, offer: str, request_host: str | None = None) -> str:
         """Forward one browser SDP offer and return go2rtc's SDP answer."""
         if not self.available:
-            raise Go2RTCError(self.error or "WebRTC gateway is not available")
+            if not (self.external_api and self._start_external()):
+                raise Go2RTCError(self.error or "WebRTC gateway is not available")
         name = _stream_name(entry)
         if name not in self._names:
             raise Go2RTCError(f"camera {entry.id} has no WebRTC stream")
+        if self.external_api:
+            # Home Assistant's go2rtc keeps runtime streams in memory only;
+            # a restart or a watchdog respawn drops them.
+            try:
+                if self._register_external_streams():
+                    raise Go2RTCError(
+                        "the HA go2rtc no longer has the Hikbridge camera streams"
+                    )
+            except Go2RTCError:
+                self.available = False
+                raise
+        try:
+            return self._post_offer(name, offer, request_host)
+        except Go2RTCError as exc:
+            # The optional Opus source needs go2rtc's own RTSP relay.  When
+            # that relay is unavailable the whole offer fails, so retry once
+            # with the camera's plain RTSP source and stay video-only.
+            if not (self.external_api and self._audio_sources):
+                raise
+            _LOGGER.warning(
+                "WebRTC exchange for %s failed (%s); retrying without the "
+                "Opus audio source", entry.id, exc,
+            )
+            self._audio_sources = False
+            if self._register_external_streams(force=True):
+                raise
+            return self._post_offer(name, offer, request_host)
+
+    def _post_offer(self, name: str, offer: str,
+                    request_host: str | None) -> str:
+        """Send one SDP offer to go2rtc and return its answer."""
         body = json.dumps({"type": "offer", "sdp": offer}).encode("utf-8")
         response = self._request(
             "POST",
@@ -303,15 +487,22 @@ class Go2RTCManager:
             return sdp
 
         candidate_lines = []
+        # The bundled gateway listens on UDP and TCP; Home Assistant's own
+        # go2rtc is configured with TCP only, so advertising UDP there would
+        # just waste ICE time.
+        transports = [
+            ("udp", "typ host"),
+            ("tcp", "typ host tcptype passive"),
+        ] if not self.external_api else [
+            ("tcp", "typ host tcptype passive"),
+        ]
         for index, address in enumerate(addresses, start=1):
-            candidate_lines.append(
-                f"a=candidate:900000{index:04d} 1 udp 2105458943 "
-                f"{address} {self.media_port} typ host"
-            )
-            candidate_lines.append(
-                f"a=candidate:900001{index:04d} 1 tcp 2105458943 "
-                f"{address} {self.media_port} typ host tcptype passive"
-            )
+            for offset, (transport, kind) in enumerate(transports, start=1):
+                candidate_lines.append(
+                    f"a=candidate:{900000 + index * 10 + offset} 1 "
+                    f"{transport} 2105458943 {address} "
+                    f"{self.advertise_port} {kind}"
+                )
 
         lines: list[str] = []
         added = False
@@ -373,21 +564,10 @@ class Go2RTCManager:
         lines += [
             "streams:",
         ]
-        for name, entry in self._names.items():
-            url = str(entry.rtsp_url)
-            # Keep the transport on TCP for the same reason the MSE path does:
-            # packet loss on Wi-Fi otherwise shows up as frozen video.
-            if "#" not in url:
-                url += "#transport=tcp"
+        for name in self._names:
             lines.append(f"  {name}:")
-            lines.append(f"    - {json.dumps(url, ensure_ascii=True)}")
-            # Browsers do not decode AAC in WebRTC. go2rtc can reuse the
-            # RTSP source and transcode only its audio to Opus; cameras
-            # without an intercom/audio codec stay on the video-only source.
-            if getattr(entry.camera, "audio_codec", None):
-                lines.append(
-                    f"    - {json.dumps(f'ffmpeg:{name}#audio=opus', ensure_ascii=True)}"
-                )
+            for source in self._sources(name):
+                lines.append(f"    - {json.dumps(source, ensure_ascii=True)}")
         with open(self._config_path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
 
@@ -444,7 +624,8 @@ class Go2RTCManager:
     def _request(self, method: str, path: str, body: bytes | None = None,
                  headers: dict[str, str] | None = None,
                  timeout: float = 2.0) -> bytes:
-        url = f"http://127.0.0.1:{self.api_port}{path}"
+        base = self.external_api or f"http://127.0.0.1:{self.api_port}"
+        url = f"{base}{path}"
         request = urllib.request.Request(
             url,
             data=body,

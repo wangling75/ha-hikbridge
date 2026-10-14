@@ -32,7 +32,11 @@ import urllib.request
 import hikbridge  # absolute self-import: publishes the timezone status
 
 from .server import CameraEntry, serve
-from .go2rtc import Go2RTCManager
+from .go2rtc import (
+    HA_GO2RTC_API,
+    HA_GO2RTC_WEBRTC_PORT,
+    Go2RTCManager,
+)
 from .sdk import HikCamera
 
 _LOGGER = logging.getLogger("hikbridge")
@@ -160,6 +164,93 @@ def _build_cameras(options: dict, args: argparse.Namespace) -> list[CameraEntry]
     return entries
 
 
+def _probe_go2rtc(api_url: str, timeout: float = 1.5) -> bool:
+    """Return True when api_url answers like a go2rtc instance.
+
+    Home Assistant starts its own go2rtc inside the HA container, which
+    shares the host network namespace with this add-on.  A quick probe is
+    all that is needed to tell whether reusing it is possible.
+    """
+    try:
+        request = urllib.request.Request(api_url.rstrip("/") + "/api")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+    except Exception:  # noqa: BLE001 - any failure means 'not available'
+        return False
+    return isinstance(payload, dict) and bool(payload.get("version"))
+
+
+def _build_webrtc(cameras: list[CameraEntry], options: dict) -> Go2RTCManager | None:
+    """Create the WebRTC gateway manager for the configured backend.
+
+    ``bundled`` starts the go2rtc binary from the add-on image and binds its
+    own media port, which is what a plain Docker deployment forwards.
+    ``home_assistant`` publishes the cameras to the go2rtc that Home
+    Assistant already runs, so the plugin never exposes a port of its own.
+    ``auto`` (the default) picks Home Assistant when its go2rtc answers on
+    the loopback API and falls back to the bundled gateway otherwise.
+    """
+    if not bool(_clean(options.get("webrtc"), True)):
+        return None
+
+    try:
+        # HA's own go2rtc owns 11984 on the loopback interface, so the
+        # bundled gateway stays one port above it.
+        api_port = int(_clean(options.get("webrtc_api_port"), 11985))
+        media_port = int(_clean(options.get("webrtc_port"), 18554))
+        ha_port = int(_clean(options.get("ha_webrtc_port"), HA_GO2RTC_WEBRTC_PORT))
+    except (TypeError, ValueError) as exc:
+        _LOGGER.error("invalid WebRTC port configuration: %s", exc)
+        return None
+
+    raw_candidates = options.get("webrtc_candidates")
+    webrtc_candidates = (
+        [str(value) for value in raw_candidates if str(value).strip()]
+        if isinstance(raw_candidates, list) else []
+    )
+    raw_ice_servers = options.get("webrtc_ice_servers")
+    webrtc_ice_servers = (
+        [str(value) for value in raw_ice_servers if str(value).strip()]
+        if isinstance(raw_ice_servers, list) else None
+    )
+
+    backend = str(_clean(options.get("webrtc_backend"), "auto")).strip().lower()
+    if backend not in ("auto", "bundled", "home_assistant"):
+        _LOGGER.warning("unknown webrtc_backend %r, using auto", backend)
+        backend = "auto"
+    ha_api = str(_clean(options.get("ha_go2rtc_api"), HA_GO2RTC_API)).rstrip("/")
+
+    if backend in ("auto", "home_assistant"):
+        if backend == "auto" and not _probe_go2rtc(ha_api):
+            _LOGGER.info(
+                "no go2rtc at %s, using the bundled WebRTC gateway", ha_api
+            )
+        else:
+            shared = Go2RTCManager(
+                cameras,
+                api_port=api_port,
+                media_port=media_port,
+                candidates=webrtc_candidates,
+                ice_servers=webrtc_ice_servers,
+                external_api=ha_api,
+                advertise_port=ha_port,
+            )
+            if shared.start():
+                return shared
+            _LOGGER.warning(
+                "cannot reuse the Home Assistant go2rtc (%s); "
+                "starting the bundled WebRTC gateway instead", shared.error,
+            )
+
+    return Go2RTCManager(
+        cameras,
+        api_port=api_port,
+        media_port=media_port,
+        candidates=webrtc_candidates,
+        ice_servers=webrtc_ice_servers,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Hikvision/EZVIZ PTZ + intercom bridge")
     parser.add_argument("--options-file",
@@ -194,33 +285,10 @@ def main(argv: list[str] | None = None) -> int:
 
     token = _clean(options.get("auth_token")) or args.token
 
-    # WebRTC is an optional, self-contained playback path.  The binary is
-    # bundled in the add-on image, but a missing or unusable gateway must
-    # never prevent the existing PTZ, snapshot and MSE features from loading.
-    webrtc = None
-    if bool(_clean(options.get("webrtc"), True)):
-        try:
-            webrtc_api_port = int(_clean(options.get("webrtc_api_port"), 11984))
-            webrtc_media_port = int(_clean(options.get("webrtc_port"), 18554))
-            raw_candidates = options.get("webrtc_candidates")
-            webrtc_candidates = (
-                [str(value) for value in raw_candidates if str(value).strip()]
-                if isinstance(raw_candidates, list) else []
-            )
-            raw_ice_servers = options.get("webrtc_ice_servers")
-            webrtc_ice_servers = (
-                [str(value) for value in raw_ice_servers if str(value).strip()]
-                if isinstance(raw_ice_servers, list) else None
-            )
-            webrtc = Go2RTCManager(
-                cameras,
-                api_port=webrtc_api_port,
-                media_port=webrtc_media_port,
-                candidates=webrtc_candidates,
-                ice_servers=webrtc_ice_servers,
-            )
-        except (TypeError, ValueError) as exc:
-            _LOGGER.error("invalid WebRTC port configuration: %s", exc)
+    # WebRTC is an optional, self-contained playback path.  A missing or
+    # unusable gateway must never prevent the existing PTZ, snapshot and MSE
+    # features from loading.
+    webrtc = _build_webrtc(cameras, options)
 
     # Browsers only allow microphone capture on secure origins, so HTTPS is
     # what makes the web UI press-to-talk button work.

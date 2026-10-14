@@ -304,13 +304,22 @@
   }
 
   // ---- 摄像头列表 ----
+  // /health tells us which go2rtc backend is in use. "home_assistant"
+  // means HA's own go2rtc serves the media, so the plugin exposes no
+  // WebRTC port at all.
+  function setWebRtcInfo(info) {
+    webRtcAvailable = !!info.webrtc;
+    webRtcBackend = info.webrtc_backend || "";
+    webRtcPort = info.webrtc_port || null;
+    updatePlayerUi();
+  }
+
   function loadCameras() {
     return api("/health").then(function (r) { return r.json(); }).then(function (info) {
       cameras = (info.cameras && info.cameras.length)
         ? info.cameras
         : [{ id: "", name: info.serial || "camera", serial: info.serial }];
-      webRtcAvailable = !!info.webrtc;
-      updatePlayerUi();
+      setWebRtcInfo(info);
       buildTabs();
       select(cameras[0].id);
       setStatus(true, "已连接 · " + cameras.length + " 台摄像头");
@@ -418,27 +427,45 @@
   var LIVE_KEEP_SECONDS = 3;
   var LIVE_MAX_LAG = 1.2;
   var LIVE_MAX_QUEUE_BYTES = 8 * 1024 * 1024;
-  var streamMode = localStorage.getItem("hikbridge.player") || "webrtc";
-  if (INGRESS_MODE) streamMode = "mse";
+  // An explicit choice is remembered; otherwise the HA sidebar starts on
+  // the same-origin MSE stream (no extra port needed) while a direct LAN
+  // or Docker page starts on WebRTC.
+  var savedMode = localStorage.getItem("hikbridge.player");
+  var streamMode = savedMode || (INGRESS_MODE ? "mse" : "webrtc");
   var webRtcAvailable = false;
+  // "home_assistant" means the plugin reuses HA's own go2rtc, so WebRTC
+  // media leaves through HA's port instead of one owned by the plugin.
+  var webRtcBackend = "";
+  var webRtcPort = null;
+  function webRtcAllowed() {
+    return webRtcAvailable &&
+      (!INGRESS_MODE || webRtcBackend === "home_assistant");
+  }
   var liveState = {
     source: null, buffer: null, abort: null, objectUrl: null, ws: null,
     queue: [], queueBytes: 0, active: false, restarting: false,
     mode: "mse", pc: null, remoteStream: null, hasAudio: null,
     watchdog: null, lastFrameAt: 0, retries: 0, webRtcFallback: false,
+    webRtcTimer: null,
     transport: "ws", wsFallback: false, wsReceived: false
   };
 
   function updatePlayerUi() {
-    if (!webRtcAvailable && streamMode === "webrtc") streamMode = "mse";
-    if (INGRESS_MODE) streamMode = "mse";
+    if (!webRtcAllowed() && streamMode === "webrtc") streamMode = "mse";
     Array.prototype.forEach.call(playerSeg.children, function (b) {
       b.classList.toggle("on", b.dataset.player === streamMode);
-      if (b.dataset.player === "webrtc") b.disabled = INGRESS_MODE || !webRtcAvailable;
+      if (b.dataset.player === "webrtc") b.disabled = !webRtcAllowed();
     });
-    playerHint.textContent = INGRESS_MODE
-      ? "HA 侧边栏使用同源兼容模式"
-      : (webRtcAvailable ? "" : "WebRTC 未启用，使用兼容模式");
+    if (!webRtcAvailable) {
+      playerHint.textContent = "WebRTC 未启用，使用兼容模式";
+    } else if (INGRESS_MODE && webRtcBackend === "home_assistant") {
+      playerHint.textContent = "复用 HA 内置 go2rtc（WebRTC 走 HA 的 "
+        + (webRtcPort || "") + " 端口，连不上自动回退兼容模式）";
+    } else if (INGRESS_MODE) {
+      playerHint.textContent = "HA 侧边栏使用同源兼容模式";
+    } else {
+      playerHint.textContent = "";
+    }
   }
 
   function liveMime() {
@@ -509,6 +536,10 @@
     }
     liveState.active = false;
     clearLiveWatchdog();
+    if (liveState.webRtcTimer) {
+      clearTimeout(liveState.webRtcTimer);
+      liveState.webRtcTimer = null;
+    }
     if (liveState.abort) { try { liveState.abort.abort(); } catch (e) {} }
     if (liveState.ws) { try { liveState.ws.close(); } catch (e) {} }
     if (liveState.pc) { try { liveState.pc.close(); } catch (e) {} }
@@ -672,6 +703,10 @@
     pc.addTransceiver("video", { direction: "recvonly" });
     if (liveState.hasAudio) pc.addTransceiver("audio", { direction: "recvonly" });
     pc.ontrack = function (ev) {
+      if (liveState.webRtcTimer) {
+        clearTimeout(liveState.webRtcTimer);
+        liveState.webRtcTimer = null;
+      }
       if (ev.streams && ev.streams[0]) {
         liveState.remoteStream = ev.streams[0];
         live.srcObject = ev.streams[0];
@@ -694,7 +729,16 @@
       });
     };
     pc.onconnectionstatechange = function () {
-      if (pc.connectionState === "failed" && liveState.active) restartLive("WebRTC 连接失败");
+      if (!liveState.active || liveState.pc !== pc) return;
+      var st = pc.connectionState;
+      if (st === "connected" || st === "completed") {
+        if (liveState.webRtcTimer) {
+          clearTimeout(liveState.webRtcTimer);
+          liveState.webRtcTimer = null;
+        }
+        return;
+      }
+      if (st === "failed") restartLive("WebRTC 连接失败");
     };
     pc.createOffer().then(function (offer) {
       return pc.setLocalDescription(offer);
@@ -709,7 +753,17 @@
       if (!answer.ok) throw new Error(answer.error || "WebRTC SDP 交换失败");
       return pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
     }).then(function () {
+      if (!liveState.active || liveState.pc !== pc) return;
       startLiveWatchdog();
+      // HA's WebRTC port is frequently not forwarded. Without this timer the
+      // browser would sit in "checking" for 20+ seconds before falling back
+      // to the same-origin MSE stream.
+      liveState.webRtcTimer = setTimeout(function () {
+        if (!liveState.active || liveState.pc !== pc) return;
+        var st = pc.connectionState;
+        if (st === "connected" || st === "completed") return;
+        handleWebRTCFailure(new Error("WebRTC 未能建立媒体连接"));
+      }, 6000);
     }).catch(function (e) {
       if (liveState.active) handleWebRTCFailure(e);
     });
@@ -856,7 +910,7 @@
       showNotice("该摄像头没有配置 <code>rtsp_url</code>，只能使用抓图预览。");
       return;
     }
-    if (!INGRESS_MODE && streamMode === "webrtc" && webRtcAvailable) {
+    if (streamMode === "webrtc" && webRtcAllowed()) {
       startWebRTC();
       return;
     }
@@ -1331,14 +1385,12 @@
       .then(function (info) {
         if (!info) return;
         if (info.https_port) httpsPort = info.https_port;
-        webRtcAvailable = !!info.webrtc;
-        updatePlayerUi();
+        setWebRtcInfo(info);
       })
       .catch(function () {});
     setInterval(function () {
       api("/health").then(function (r) { return r.json(); }).then(function (info) {
-        webRtcAvailable = !!info.webrtc;
-        updatePlayerUi();
+        setWebRtcInfo(info);
         setStatus(true, "已连接");
       })
         .catch(function () { setStatus(false, "网桥无响应"); });

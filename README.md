@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.20
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.21
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.20
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.20 ./hikbridge
+docker build -t hikbridge:0.2.21 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -163,8 +163,11 @@ cp options.example.json options.json
   "ssl": false,
   "ssl_port": 8655,
   "webrtc": true,
+  "webrtc_backend": "auto",
+  "ha_go2rtc_api": "http://127.0.0.1:11984",
+  "ha_webrtc_port": 18555,
   "webrtc_port": 18554,
-  "webrtc_api_port": 11984,
+  "webrtc_api_port": 11985,
   "webrtc_candidates": [],
   "webrtc_ice_servers": [
     "stun:stun.cloudflare.com:3478",
@@ -175,11 +178,19 @@ cp options.example.json options.json
 
 `auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 是后备输入采样率；插件登录后会优先使用摄像头实际声明的编码和采样率。
 
-网页默认优先使用插件内置的 **go2rtc WebRTC**，不安装 Scrypted 也能直接看带声音的实时画面。WebRTC 媒体端口是 `18554/tcp+udp`，go2rtc 管理 API 只监听容器内的 `127.0.0.1:11984`，不会暴露到局域网。HA add-on 在 host 网络下会按摄像头路由自动选择实际局域网出口地址作为 ICE 地址，避免把 `172.30.32.1` 这类 Supervisor 地址发给局域网浏览器。HA 自带的 go2rtc 通常占用 `1984/8555/8554`；Hikbridge 使用独立端口，并把内部 RTSP relay 放到随机回环端口，因此不会抢占 HA 的 `8554`。摄像头音轨会自动转成浏览器 WebRTC 支持的 Opus；没有音轨的 225 仍保持视频-only。
+网页默认优先使用 **go2rtc WebRTC**，不安装 Scrypted 也能直接看带声音的实时画面。`webrtc_backend` 决定用哪一个 go2rtc：
+
+* `auto`（默认）：检测到 Home Assistant 自带的 go2rtc（回环 API `127.0.0.1:11984`）就直接复用，插件不再开任何 WebRTC 端口；检测不到（纯 Docker）就自动回退到内置 go2rtc。
+* `home_assistant`：强制复用 HA 的 go2rtc。插件只把每台摄像头注册成 `hikbridge-<id>` 流，SDP 交换走回环 API，媒体走 HA 自己的 `18555/tcp`。媒体流是运行时的，HA 重启 go2rtc 后插件会自动重新注册。
+* `bundled`：强制启动插件镜像里的 go2rtc，媒体端口 `18554/tcp+udp`，适合纯 Docker 自己映射端口。
+
+复用 HA 内置 go2rtc 后，插件对外只需要 HA 的 `8123`：兼容模式（MSE）走 `/api/hassio_ingress/...` 同源 HTTP，不依赖任何插件端口。HA add-on 在 host 网络下会按摄像头路由自动选择实际局域网出口地址作为 ICE 地址，避免把 `172.30.32.1` 这类 Supervisor 地址发给局域网浏览器。摄像头音轨会自动转成浏览器 WebRTC 支持的 Opus；如果该音频源在目标 go2rtc 上不可用（relay 不可达），插件会自动降级成视频-only 再重试一次，不会把整路画面弄挂。
 
 内置 go2rtc 是上游 [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc) 的 `v1.9.14`（MIT 许可）。
 
-远程通过 HA 域名打开侧边栏时，页面直接使用同源 `/live.mp4` HTTP 兼容模式，不再依赖公网访问 `18554`，也不会先撞 HA ingress 的 WebSocket 代理。如果希望远程也使用 WebRTC，需要把 `18554/tcp` 和 `18554/udp` 转发到 HA 主机，或者在 `webrtc_ice_servers` 里配置 TURN。纯 Docker 使用 `-p` 端口映射时，把 Docker 主机的地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:18554"]`；动态公网 IP 可以写成 `"stun:18554"`，由 STUN 自动发现公网地址。
+远程通过 HA 域名打开侧边栏时，默认走同源 `/live.mp4` HTTP 兼容模式（约 1～3 秒延时），只靠 HA 的 `8123` 就能看，也不会再撞 HA ingress 的 WebSocket 代理。这正是 HA 自带 WebRTC 摄像头卡片的做法：WebRTC 能连就用，连不上就回退 HLS/MSE。HA 内置 go2rtc 的 WebRTC 媒体端口是 `18555/tcp`，把它转发到 HA 主机（或在 `webrtc_ice_servers` 里配 TURN）之后，远程才会走真正的 WebRTC，HA 自己的摄像头卡片和 Hikbridge 侧边栏同时受益。侧边栏里手动点「WebRTC」会先尝试连接，6 秒内没建立媒体连接就自动回到兼容模式。
+
+纯 Docker 使用 `-p` 端口映射时，把 Docker 主机的地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:18554"]`；动态公网 IP 可以写成 `"stun:18554"`，由 STUN 自动发现公网地址。
 
 `webrtc_ice_servers` 支持 STUN 和 TURN。TURN 可以写成 `turn:user:pass@turn.example.com:3478?transport=udp`，也可以直接写 JSON 对象字符串。HA add-on 默认带两个公共 STUN；公共 STUN 只帮助发现公网地址，不转发媒体，端口无法直连时仍需要 TURN 或使用 WebSocket 兼容模式。
 
@@ -199,7 +210,7 @@ docker run -d \
   -p 18554:18554/udp \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.20
+  ghcr.io/wangling75/amd64-hikbridge:0.2.21
 ```
 
 查看日志：
