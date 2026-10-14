@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.17
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.18
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.17
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.17 ./hikbridge
+docker build -t hikbridge:0.2.18 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -171,11 +171,11 @@ cp options.example.json options.json
 
 `auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 是后备输入采样率；插件登录后会优先使用摄像头实际声明的编码和采样率。
 
-网页默认使用插件内置的 **go2rtc WebRTC**，不安装 Scrypted 也能直接看带声音的实时画面。WebRTC 媒体端口是 `18554/tcp+udp`，go2rtc 管理 API 只监听容器内的 `127.0.0.1:11984`，不会暴露到局域网。HA 自带的 go2rtc 通常占用 `1984/8555/8554`；Hikbridge 使用独立端口，并把内部 RTSP relay 放到随机回环端口，因此不会抢占 HA 的 `8554`。WebRTC 不可用时，页面会自动回退到 `/live.mp4` 兼容模式。
+网页默认使用插件内置的 **go2rtc WebRTC**，不安装 Scrypted 也能直接看带声音的实时画面。WebRTC 媒体端口是 `18554/tcp+udp`，go2rtc 管理 API 只监听容器内的 `127.0.0.1:11984`，不会暴露到局域网。HA add-on 在 host 网络下会按摄像头路由自动选择实际局域网出口地址作为 ICE 地址，避免把 `172.30.32.1` 这类 Supervisor 地址发给局域网浏览器。HA 自带的 go2rtc 通常占用 `1984/8555/8554`；Hikbridge 使用独立端口，并把内部 RTSP relay 放到随机回环端口，因此不会抢占 HA 的 `8554`。WebRTC 不可用时，页面会自动回退到 `/live.mp4` 兼容模式。
 
 内置 go2rtc 是上游 [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc) 的 `v1.9.14`（MIT 许可）。
 
-HA add-on 使用 host 网络，`webrtc_candidates` 保持 `[]` 即可。纯 Docker 如果使用 `-p` 端口映射，需要把 Docker 主机的局域网地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:18554"]`；否则 SDP 会返回容器内网 IP，远程浏览器无法建立媒体连接。
+HA add-on 使用 host 网络，`webrtc_candidates` 保持 `[]` 即可，插件会从到摄像头的实际路由自动选择 ICE 地址。纯 Docker 如果使用 `-p` 端口映射，需要把 Docker 主机的局域网地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:18554"]`；否则 SDP 会返回容器内网 IP，远程浏览器无法建立媒体连接。
 
 浏览器不能直接播放 `rtsp://`。HA 里的 RTSP 卡片能播放，是因为 HA/go2rtc 在服务端取流后再转给浏览器；Hikbridge 现在也内置了同样的转换，所以不需要 Scrypted。没有音轨的摄像头（例如 225）会显示「无音轨」，不会误开对讲。
 
@@ -193,7 +193,7 @@ docker run -d \
   -p 18554:18554/udp \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.17
+  ghcr.io/wangling75/amd64-hikbridge:0.2.18
 ```
 
 查看日志：

@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -50,6 +51,7 @@ class Go2RTCManager:
         self.candidates = [
             str(value).strip() for value in (candidates or []) if str(value).strip()
         ]
+        self.ice_ips: list[str] = []
         self.available = False
         self.error: str | None = None
         self._proc: subprocess.Popen | None = None
@@ -72,6 +74,8 @@ class Go2RTCManager:
             "available": self.available,
             "error": self.error,
             "port": self.media_port if self.available else None,
+            "candidates": list(self.candidates),
+            "ice_ips": list(self.ice_ips),
         }
 
     def start(self) -> bool:
@@ -91,6 +95,11 @@ class Go2RTCManager:
             return False
 
         try:
+            if not self.candidates:
+                self.ice_ips = self._detect_ice_ips()
+                self.candidates = [
+                    f"{address}:{self.media_port}" for address in self.ice_ips
+                ]
             self._write_config()
             self._proc = subprocess.Popen(
                 [self.binary, "-config", self._config_path],
@@ -142,6 +151,10 @@ class Go2RTCManager:
                 _LOGGER.info(
                     "WebRTC gateway ready on UDP/TCP %s (API 127.0.0.1:%s)",
                     self.media_port, self.api_port,
+                )
+                _LOGGER.info(
+                    "WebRTC candidates=%s ice_ips=%s",
+                    self.candidates, self.ice_ips,
                 )
                 return True
             except (Go2RTCError, ValueError) as exc:
@@ -212,6 +225,13 @@ class Go2RTCManager:
             lines.append("  candidates:")
             for candidate in self.candidates:
                 lines.append(f"    - {json.dumps(candidate)}")
+        if self.ice_ips:
+            lines += [
+                "  filters:",
+                "    ips:",
+            ]
+            for address in self.ice_ips:
+                lines.append(f"      - {json.dumps(address)}")
         lines += [
             "streams:",
         ]
@@ -224,6 +244,40 @@ class Go2RTCManager:
             lines.append(f"  {name}: {json.dumps(url, ensure_ascii=True)}")
         with open(self._config_path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
+
+    def _detect_ice_ips(self) -> list[str]:
+        """Find the host-side address used to reach each camera.
+
+        HA add-ons with host networking can still expose the Supervisor
+        bridge address first. go2rtc then advertises that unreachable
+        address in ICE. A UDP route lookup to each camera gives the actual
+        LAN source address without relying on a user-specific hard-coded IP.
+        """
+        addresses: list[str] = []
+        for entry in self.cameras:
+            camera = entry.camera
+            host = str(getattr(camera, "ip", "") or "")
+            port = int(getattr(camera, "port", 8000) or 8000)
+            if not host:
+                continue
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(0.5)
+                    sock.connect((host, port))
+                    address = str(sock.getsockname()[0])
+            except OSError as exc:
+                _LOGGER.debug(
+                    "cannot detect WebRTC source address for %s: %s", host, exc
+                )
+                continue
+            if address and address not in addresses:
+                addresses.append(address)
+        if not addresses:
+            _LOGGER.warning(
+                "WebRTC could not auto-detect a LAN address; "
+                "set webrtc_candidates if the browser cannot connect"
+            )
+        return addresses
 
     def _cleanup_config(self) -> None:
         path = self._config_dir

@@ -25,8 +25,11 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
 
 WebRTC does not require Scrypted. The add-on starts go2rtc on media port
 `18554/tcp+udp`, keeps the go2rtc API on `127.0.0.1:11984`, and proxies only
-the authenticated SDP exchange through Hikbridge. Its internal RTSP relay
-uses a random loopback port, so HA's own `8554` listener is untouched.
+the authenticated SDP exchange through Hikbridge. With host networking it
+automatically uses the LAN source address for each camera as the ICE address,
+so Supervisor bridge addresses such as `172.30.32.1` are not advertised to a
+LAN browser. Its internal RTSP relay uses a random loopback port, so HA's own
+`8554` listener is untouched.
 Browsers cannot play an
 `rtsp://` URL directly; Home Assistant's RTSP cards also relay the stream
 server-side. Cameras without an audio track (for example the 225) show
@@ -111,7 +114,7 @@ webrtc_candidates: []
 | `webrtc` | Enable the bundled WebRTC playback path, default `true` |
 | `webrtc_port` | go2rtc media port for TCP and UDP, default `18554` |
 | `webrtc_api_port` | Loopback-only go2rtc API port, default `11984` |
-| `webrtc_candidates` | Extra advertised WebRTC addresses; required as `host-ip:18554` for bridged Docker port mapping |
+| `webrtc_candidates` | Extra advertised WebRTC addresses; required as `host-ip:18554` for bridged Docker port mapping. Leave empty for the HA add-on so the LAN address is auto-detected |
 
 Browsers only expose `navigator.mediaDevices` on secure origins, so the web
 UI press-to-talk button cannot record over plain HTTP. Turn `ssl` on and open

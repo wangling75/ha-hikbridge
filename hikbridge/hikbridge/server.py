@@ -218,6 +218,14 @@ def _handler(state: _State):
                             state.webrtc.media_port
                             if state.webrtc and state.webrtc.available else None
                         ),
+                        "webrtc_candidates": (
+                            list(state.webrtc.candidates)
+                            if state.webrtc and state.webrtc.available else []
+                        ),
+                        "webrtc_ice_ips": (
+                            list(state.webrtc.ice_ips)
+                            if state.webrtc and state.webrtc.available else []
+                        ),
                         "webrtc_error": (state.webrtc.error if state.webrtc else None),
                         "serial": default.camera.serial,
                         "device": default.camera.device,
