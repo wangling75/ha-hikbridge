@@ -323,7 +323,8 @@
   function select(id) {
     if (current && current.id === id) return;
     stopTalk();
-    stopLive();
+    liveState.restarting = false;
+    stopLive(false);
     current = cameras.filter(function (c) { return c.id === id; })[0] || cameras[0];
     Array.prototype.forEach.call(tabsBox.children, function (b) {
       b.classList.toggle("on", b.dataset.id === current.id);
@@ -331,6 +332,7 @@
     log("切换到 " + (current.name || current.id));
     applyRate(snapRate);
     if (current.live) startLive();
+    else if (snapRate > 0) loadSnap();
   }
 
   // ---- 抓图 ----
@@ -357,8 +359,12 @@
     if (rate > 0) {
       snapMsg.textContent = "正在加载画面…";
       snapMsg.classList.remove("hide");
-      loadSnap();
-      snapTimer = setInterval(loadSnap, rate);
+      // Do not keep polling snapshots behind a live MSE stream: those SDK
+      // requests compete with the RTSP/ffmpeg process on the same camera.
+      if (!liveState.active) loadSnap();
+      snapTimer = setInterval(function () {
+        if (!liveState.active) loadSnap();
+      }, rate);
     } else {
       snapMsg.textContent = "预览已关闭";
       snapMsg.classList.remove("hide");
@@ -392,18 +398,29 @@
   });
 
   // ---- 实时画面：RTSP 在服务端转成分片 MP4，再由 MSE 播放音频和视频 ----
+  var LIVE_KEEP_SECONDS = 3;
+  var LIVE_MAX_LAG = 1.2;
+  var LIVE_MAX_QUEUE_BYTES = 8 * 1024 * 1024;
   var liveState = {
     source: null, buffer: null, abort: null, objectUrl: null,
-    queue: [], active: false
+    queue: [], queueBytes: 0, active: false, restarting: false
   };
 
   function liveMime() {
     var MS = window.MediaSource || window.ManagedMediaSource;
-    var candidates = [
+    var hasAudio = !!(current && current.audio_codec);
+    var candidates = hasAudio ? [
       'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
       'video/mp4; codecs="avc1.4D401F,mp4a.40.2"',
       'video/mp4; codecs="avc1.640028,mp4a.40.2"',
+      'video/mp4; codecs="avc1.64001F,mp4a.40.2"',
       'video/mp4; codecs="avc1.42E01E"',
+      'video/mp4'
+    ] : [
+      'video/mp4; codecs="avc1.42E01E"',
+      'video/mp4; codecs="avc1.4D401F"',
+      'video/mp4; codecs="avc1.640028"',
+      'video/mp4; codecs="avc1.64001F"',
       'video/mp4'
     ];
     for (var i = 0; i < candidates.length; i++) {
@@ -418,7 +435,8 @@
     if (!on) soundToggle.textContent = "开启声音";
   }
 
-  function stopLive() {
+  function stopLive(resumeSnap) {
+    if (resumeSnap !== false) liveState.restarting = false;
     liveState.active = false;
     if (liveState.abort) {
       try { liveState.abort.abort(); } catch (e) {}
@@ -430,6 +448,7 @@
     liveState.buffer = null;
     liveState.abort = null;
     liveState.queue = [];
+    liveState.queueBytes = 0;
     if (liveState.objectUrl) {
       try { URL.revokeObjectURL(liveState.objectUrl); } catch (e) {}
       liveState.objectUrl = null;
@@ -440,6 +459,7 @@
     live.style.display = "none";
     snap.style.display = "";
     setLiveUi(false);
+    if (resumeSnap !== false && snapRate > 0) loadSnap();
   }
 
   function failLive(err) {
@@ -450,13 +470,37 @@
     showNotice("实时画面加载失败，已保留抓图预览。<br>" + message);
   }
 
+  function liveBufferedEnd() {
+    var sb = liveState.buffer;
+    if (!sb || !sb.buffered.length) return null;
+    return sb.buffered.end(sb.buffered.length - 1);
+  }
+
+  function syncLive() {
+    if (!liveState.active || live.seeking) return;
+    var end = liveBufferedEnd();
+    if (end === null) return;
+    // Keep the decoder close to the live edge. Without this, a slow
+    // rendering/decoding interval can leave the player seconds behind
+    // while the network stream continues arriving.
+    if (end - live.currentTime > LIVE_MAX_LAG) {
+      try { live.currentTime = Math.max(0, end - 0.25); } catch (e) {}
+    }
+  }
+
   function trimLive() {
     var sb = liveState.buffer;
     if (!sb || sb.updating || !sb.buffered.length) return;
+    syncLive();
     var start = sb.buffered.start(0);
     var end = sb.buffered.end(sb.buffered.length - 1);
-    if (end - start > 20) {
-      try { sb.remove(start, end - 20); } catch (e) {}
+    var removeTo = end - LIVE_KEEP_SECONDS;
+    // Never remove data immediately behind the play head.
+    if (live.currentTime > start) {
+      removeTo = Math.min(removeTo, live.currentTime - 0.5);
+    }
+    if (removeTo > start + 0.1) {
+      try { sb.remove(start, removeTo); } catch (e) {}
     }
   }
 
@@ -464,11 +508,13 @@
     var sb = liveState.buffer;
     if (!sb || sb.updating || !liveState.queue.length) return;
     var chunk = liveState.queue.shift();
+    liveState.queueBytes -= chunk.byteLength || chunk.length;
     try {
       sb.appendBuffer(chunk);
     } catch (e) {
       if (e.name === "QuotaExceededError") {
         liveState.queue.unshift(chunk);
+        liveState.queueBytes += chunk.byteLength || chunk.length;
         trimLive();
         setTimeout(pumpLive, 150);
       } else {
@@ -477,10 +523,26 @@
     }
   }
 
+  function restartLive() {
+    if (!liveState.active || liveState.restarting) return;
+    liveState.restarting = true;
+    var id = current && current.id;
+    log("实时画面积压，正在重新连接…", "e");
+    stopLive(false);
+    setTimeout(function () {
+      liveState.restarting = false;
+      if (current && current.id === id) startLive();
+    }, 350);
+  }
+
   function enqueueLive(chunk) {
     if (!liveState.active) return;
     liveState.queue.push(chunk);
-    if (liveState.queue.length > 120) liveState.queue.shift();
+    liveState.queueBytes += chunk.byteLength || chunk.length;
+    if (liveState.queueBytes > LIVE_MAX_QUEUE_BYTES) {
+      restartLive();
+      return;
+    }
     pumpLive();
   }
 
@@ -494,7 +556,7 @@
       showNotice("当前浏览器不支持实时 MP4 播放，已保留抓图预览。");
       return;
     }
-    stopLive();
+    stopLive(false);
     notice.classList.add("hide");
     var source = new MS();
     liveState.source = source;
@@ -520,12 +582,14 @@
       live.play().catch(function () {});
     });
     source.addEventListener("sourceopen", function () {
+      if (!liveState.active || liveState.source !== source) return;
       var mime = liveMime();
       if (!mime) { failLive(new Error("浏览器不支持 MP4/AAC")); return; }
       try { liveState.buffer = source.addSourceBuffer(mime); }
       catch (e) { failLive(e); return; }
       liveState.buffer.mode = "segments";
       liveState.buffer.addEventListener("updateend", function () {
+        syncLive();
         trimLive();
         pumpLive();
       });
@@ -553,7 +617,12 @@
   }
 
   liveToggle.addEventListener("click", function () {
-    if (liveState.active) stopLive(); else startLive();
+    if (liveState.active || liveState.restarting) {
+      liveState.restarting = false;
+      stopLive();
+    } else {
+      startLive();
+    }
   });
   soundToggle.addEventListener("click", function () {
     if (!liveState.active) return;
@@ -568,6 +637,7 @@
     snapMsg.classList.add("hide");
     setStatus(true, "实时画面");
   });
+  live.addEventListener("timeupdate", syncLive);
   live.addEventListener("error", function () {
     if (liveState.active) failLive(new Error("视频解码失败"));
   });
@@ -1019,7 +1089,7 @@
   }
 
   window.addEventListener("beforeunload", stopTalk);
-  window.addEventListener("beforeunload", stopLive);
+  window.addEventListener("beforeunload", function () { stopLive(false); });
   boot();
 })();
 </script>

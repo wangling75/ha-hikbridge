@@ -30,6 +30,8 @@ const DEFAULT_TALK_RATE = 16000;
 const DEFAULT_RTSP_TRANSPORT = "tcp";
 const DEFAULT_VIDEO_CODEC = "h264";
 const TALK_CONNECT_TIMEOUT_MS = 5000;
+const TALK_PCM_FRAME_MS = 20;
+const TALK_MAX_BUFFERED_BYTES = 8 * 1024;
 
 type IntercomState = {
     ffmpeg: ChildProcess;
@@ -56,7 +58,10 @@ function buildTalkFfmpegArgs(input: FFmpegInput, sampleRate: number): string[] {
         "-fflags", "nobuffer",
         "-flags", "low_delay",
         "-analyzeduration", "0",
-        "-probesize", "8192",
+        // 8 KiB was too small for some HomeKit AAC/Opus inputs: ffmpeg
+        // could miss the format header and take several hundred ms to
+        // recover. 32 KiB still keeps startup interactive.
+        "-probesize", "32768",
         "-max_delay", "0",
     ];
     const inputArguments = input.inputArguments?.slice() || [];
@@ -399,43 +404,64 @@ class HikBridgeCamera extends ScryptedDeviceBase implements Camera, VideoCamera,
             media,
             ScryptedMimeTypes.FFmpegInput,
         );
-        const ws = await this.openTalkSocket();
+        const args = buildTalkFfmpegArgs(input, this.talkSampleRate);
+        this.console.log("starting Hikbridge talkback", args.join(" "));
 
+        // Open the bridge socket while ffmpeg is starting. The previous
+        // serial path paid both startup costs one after the other.
+        const wsPromise = this.openTalkSocket();
         let ffmpeg: ChildProcess;
         try {
-            const args = buildTalkFfmpegArgs(input, this.talkSampleRate);
-            this.console.log("starting Hikbridge talkback", args.join(" "));
             ffmpeg = spawn(await mediaManager.getFFmpegPath(), args, {
                 stdio: ["ignore", "pipe", "pipe"],
             });
         }
         catch (error) {
-            ws.terminate();
+            void wsPromise.then(ws => ws.terminate(), () => {});
+            throw error;
+        }
+
+        let ws: WebSocket;
+        try {
+            ws = await wsPromise;
+        }
+        catch (error) {
+            ffmpeg.kill("SIGKILL");
             throw error;
         }
 
         const state: IntercomState = { ffmpeg, ws };
         this.intercomState = state;
 
+        const frameBytes = Math.max(2, Math.round(
+            this.talkSampleRate * TALK_PCM_FRAME_MS / 1000,
+        ) * 2);
+        let pending: Buffer = Buffer.alloc(0);
         let backlogDropped = false;
         ffmpeg.stdout?.on("data", (chunk: Buffer) => {
             if (this.intercomState !== state || ws.readyState !== WebSocket.OPEN)
                 return;
-            // Never let a slow bridge turn talkback into a growing delay.
-            if (ws.bufferedAmount > 8 * 1024) {
-                if (!backlogDropped) {
-                    this.console.warn("dropping stale talkback audio; bridge is behind");
-                    backlogDropped = true;
+            pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+            while (pending.length >= frameBytes) {
+                const frame = pending.subarray(0, frameBytes);
+                pending = pending.subarray(frameBytes);
+                // Never let a slow bridge turn talkback into a growing delay.
+                if (ws.bufferedAmount > TALK_MAX_BUFFERED_BYTES) {
+                    if (!backlogDropped) {
+                        this.console.warn("dropping stale talkback audio; bridge is behind");
+                        backlogDropped = true;
+                    }
+                    continue;
                 }
-                return;
-            }
-            backlogDropped = false;
-            try {
-                ws.send(chunk);
-            }
-            catch (error) {
-                this.console.error("Hikbridge talk send failed", error);
-                void this.stopIntercom();
+                backlogDropped = false;
+                try {
+                    ws.send(frame);
+                }
+                catch (error) {
+                    this.console.error("Hikbridge talk send failed", error);
+                    void this.stopIntercom();
+                    return;
+                }
             }
         });
 

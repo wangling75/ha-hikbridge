@@ -22,6 +22,12 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
   RTSP video/audio (`/live.mp4`, playable with the sound button),
   snapshot fallback/download, PTZ pad and click-to-toggle talk
 
+The browser live stream is fragmented every 200 ms instead of once per
+camera keyframe. The UI keeps only a few seconds of MSE buffer and
+reconnects if the stream falls too far behind, which keeps video and
+camera audio near the live edge without polling snapshots at the same
+time.
+
 ## Install
 
 1. Add this repository to the add-on store and install **Hikvision PTZ

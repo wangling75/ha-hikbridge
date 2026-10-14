@@ -362,6 +362,11 @@ def _handler(state: _State):
             # Some Hikvision cameras send absolute RTP timestamps for audio.
             # Reset both streams to zero so fragmented MP4 stays in range and
             # the browser keeps the audio track alive.
+            # Fragment on a fixed duration instead of every keyframe. The
+            # camera GOP is about one second, so frag_keyframe made MSE hold
+            # a whole second before it could append anything. A 200 ms
+            # fragment keeps the browser close to the live edge while the
+            # keyframe interval remains conservative for bandwidth.
             command = [
                 "ffmpeg", "-hide_banner", "-loglevel", "warning",
                 "-rtsp_transport", "tcp", "-i", entry.rtsp_url,
@@ -376,7 +381,8 @@ def _handler(state: _State):
                 "-af",
                 "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0:min_hard_comp=0.1",
                 "-vsync", "cfr", "-avoid_negative_ts", "make_zero",
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-movflags", "empty_moov+default_base_moof",
+                "-frag_duration", "200000",
                 "-flush_packets", "1", "-f", "mp4", "pipe:1",
             ]
             proc = subprocess.Popen(
@@ -394,6 +400,14 @@ def _handler(state: _State):
                 ).start()
             self.close_connection = True
             self.send_response(200)
+            # Live MP4 is a sequence of small fragments. Nagle can coalesce
+            # them and add visible browser latency.
+            try:
+                self.connection.setsockopt(
+                    socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
+                )
+            except OSError:
+                pass
             self.send_header("Content-Type", "video/mp4")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Transfer-Encoding", "chunked")
