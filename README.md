@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.19
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.20
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.19
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.19 ./hikbridge
+docker build -t hikbridge:0.2.20 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -179,7 +179,7 @@ cp options.example.json options.json
 
 内置 go2rtc 是上游 [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc) 的 `v1.9.14`（MIT 许可）。
 
-远程通过 HA 域名打开侧边栏时，WebRTC 失败后页面会切换到同源的 `/live.ws` WebSocket 兼容模式，不再依赖公网访问 `18554`。如果希望远程也使用 WebRTC，需要把 `18554/tcp` 和 `18554/udp` 转发到 HA 主机，或者在 `webrtc_ice_servers` 里配置 TURN。纯 Docker 使用 `-p` 端口映射时，把 Docker 主机的地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:18554"]`；动态公网 IP 可以写成 `"stun:18554"`，由 STUN 自动发现公网地址。
+远程通过 HA 域名打开侧边栏时，页面直接使用同源 `/live.mp4` HTTP 兼容模式，不再依赖公网访问 `18554`，也不会先撞 HA ingress 的 WebSocket 代理。如果希望远程也使用 WebRTC，需要把 `18554/tcp` 和 `18554/udp` 转发到 HA 主机，或者在 `webrtc_ice_servers` 里配置 TURN。纯 Docker 使用 `-p` 端口映射时，把 Docker 主机的地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:18554"]`；动态公网 IP 可以写成 `"stun:18554"`，由 STUN 自动发现公网地址。
 
 `webrtc_ice_servers` 支持 STUN 和 TURN。TURN 可以写成 `turn:user:pass@turn.example.com:3478?transport=udp`，也可以直接写 JSON 对象字符串。HA add-on 默认带两个公共 STUN；公共 STUN 只帮助发现公网地址，不转发媒体，端口无法直连时仍需要 TURN 或使用 WebSocket 兼容模式。
 
@@ -199,7 +199,7 @@ docker run -d \
   -p 18554:18554/udp \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.19
+  ghcr.io/wangling75/amd64-hikbridge:0.2.20
 ```
 
 查看日志：

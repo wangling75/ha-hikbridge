@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import secrets
+import select
 import shutil
 import socket
 import subprocess
@@ -54,6 +55,10 @@ _LOGGER = logging.getLogger("hikbridge")
 _MAX_TALK_FRAME = 64 * 1024
 # Drop an idle talk session so the camera voice channel is never held forever.
 _TALK_IDLE_TIMEOUT = 60.0
+# A live ffmpeg session normally produces data continuously. If a reverse
+# proxy leaves a half-open WebSocket behind, release the camera after this
+# many seconds without a successful frame write.
+_LIVE_STALE_TIMEOUT = 20.0
 
 _UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html")
 _ui_cache: bytes | None = None
@@ -86,7 +91,34 @@ class CameraEntry:
     rtsp_url: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     talking: bool = False
-    live_clients: int = 0
+    live_session: str | None = None
+    live_last_data: float = 0.0
+
+    def begin_live(self) -> str | None:
+        """Claim the camera's single live slot unless another one is active."""
+        now = time.monotonic()
+        with self.lock:
+            if (
+                self.live_session is not None
+                and now - self.live_last_data < _LIVE_STALE_TIMEOUT
+            ):
+                return None
+            token = secrets.token_hex(8)
+            self.live_session = token
+            self.live_last_data = now
+            return token
+
+    def touch_live(self, token: str) -> None:
+        with self.lock:
+            if self.live_session == token:
+                self.live_last_data = time.monotonic()
+
+    def end_live(self, token: str) -> None:
+        with self.lock:
+            if self.live_session != token:
+                return
+            self.live_session = None
+            self.live_last_data = 0.0
 
     def info(self) -> dict:
         return {
@@ -449,14 +481,13 @@ def _handler(state: _State):
             # A small HA VM cannot afford one full RTSP/ffmpeg session per
             # browser tab. Sharing one stream per camera keeps CPU bounded and
             # prevents the rest of Home Assistant from becoming unresponsive.
-            with entry.lock:
-                if entry.live_clients >= 1:
-                    self._json(409, {
-                        "ok": False,
-                        "error": "another live view is already using this camera",
-                    })
-                    return
-                entry.live_clients += 1
+            live_token = entry.begin_live()
+            if live_token is None:
+                self._json(409, {
+                    "ok": False,
+                    "error": "another live view is already using this camera",
+                })
+                return
 
             # Some Hikvision cameras send absolute RTP timestamps for audio.
             # Reset both streams to zero so fragmented MP4 stays in range and
@@ -473,8 +504,7 @@ def _handler(state: _State):
                     bufsize=0,
                 )
             except OSError as exc:
-                with entry.lock:
-                    entry.live_clients = max(0, entry.live_clients - 1)
+                entry.end_live(live_token)
                 self._json(500, {"ok": False, "error": f"cannot start ffmpeg: {exc}"})
                 return
             if proc.stderr is not None:
@@ -503,6 +533,11 @@ def _handler(state: _State):
             try:
                 assert proc.stdout is not None
                 while True:
+                    if not select.select([proc.stdout], [], [], 1.0)[0]:
+                        if time.monotonic() - entry.live_last_data > _LIVE_STALE_TIMEOUT:
+                            _LOGGER.warning("live stream for %s stalled; closing", entry.id)
+                            break
+                        continue
                     chunk = os.read(proc.stdout.fileno(), 16384)
                     if not chunk:
                         break
@@ -510,11 +545,11 @@ def _handler(state: _State):
                     self.wfile.write(chunk)
                     self.wfile.write(b"\r\n")
                     self.wfile.flush()
+                    entry.touch_live(live_token)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
             finally:
-                with entry.lock:
-                    entry.live_clients = max(0, entry.live_clients - 1)
+                entry.end_live(live_token)
                 try:
                     proc.terminate()
                     proc.wait(timeout=3)
@@ -550,15 +585,14 @@ def _handler(state: _State):
                 ws.close()
                 return
 
-            with entry.lock:
-                if entry.live_clients >= 1:
-                    ws.send_text(json.dumps({
-                        "ok": False,
-                        "error": "another live view is already using this camera",
-                    }))
-                    ws.close()
-                    return
-                entry.live_clients += 1
+            live_token = entry.begin_live()
+            if live_token is None:
+                ws.send_text(json.dumps({
+                    "ok": False,
+                    "error": "another live view is already using this camera",
+                }))
+                ws.close()
+                return
 
             try:
                 proc = subprocess.Popen(
@@ -566,8 +600,7 @@ def _handler(state: _State):
                     stderr=subprocess.PIPE, bufsize=0,
                 )
             except OSError as exc:
-                with entry.lock:
-                    entry.live_clients = max(0, entry.live_clients - 1)
+                entry.end_live(live_token)
                 ws.send_text(json.dumps({
                     "ok": False, "error": f"cannot start ffmpeg: {exc}",
                 }))
@@ -596,15 +629,20 @@ def _handler(state: _State):
             try:
                 assert proc.stdout is not None
                 while True:
+                    if not select.select([proc.stdout], [], [], 1.0)[0]:
+                        if time.monotonic() - entry.live_last_data > _LIVE_STALE_TIMEOUT:
+                            _LOGGER.warning("live WebSocket for %s stalled; closing", entry.id)
+                            break
+                        continue
                     chunk = os.read(proc.stdout.fileno(), 16384)
                     if not chunk:
                         break
                     ws.send_binary(chunk)
+                    entry.touch_live(live_token)
             except (BrokenPipeError, ConnectionResetError, OSError, WebSocketError):
                 pass
             finally:
-                with entry.lock:
-                    entry.live_clients = max(0, entry.live_clients - 1)
+                entry.end_live(live_token)
                 try:
                     proc.terminate()
                     proc.wait(timeout=3)

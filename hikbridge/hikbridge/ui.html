@@ -229,6 +229,10 @@
   // 两种入口才能共用同一份代码。
   var PATH_BASE = location.pathname.replace(/[^/]*$/, "").replace(/\/$/, "");
   var BASE = location.origin + PATH_BASE;
+  // HA ingress proxies ordinary HTTP reliably, but its WebSocket proxy can
+  // return a 502 after the upgrade. Use the same-origin HTTP MSE stream
+  // directly from the sidebar instead of leaving a half-open live session.
+  var INGRESS_MODE = location.pathname.indexOf("/api/hassio_ingress/") >= 0;
 
   var $ = function (id) { return document.getElementById(id); };
   var dot = $("dot"), statusText = $("statusText");
@@ -415,6 +419,7 @@
   var LIVE_MAX_LAG = 1.2;
   var LIVE_MAX_QUEUE_BYTES = 8 * 1024 * 1024;
   var streamMode = localStorage.getItem("hikbridge.player") || "webrtc";
+  if (INGRESS_MODE) streamMode = "mse";
   var webRtcAvailable = false;
   var liveState = {
     source: null, buffer: null, abort: null, objectUrl: null, ws: null,
@@ -426,11 +431,14 @@
 
   function updatePlayerUi() {
     if (!webRtcAvailable && streamMode === "webrtc") streamMode = "mse";
+    if (INGRESS_MODE) streamMode = "mse";
     Array.prototype.forEach.call(playerSeg.children, function (b) {
       b.classList.toggle("on", b.dataset.player === streamMode);
-      if (b.dataset.player === "webrtc") b.disabled = !webRtcAvailable;
+      if (b.dataset.player === "webrtc") b.disabled = INGRESS_MODE || !webRtcAvailable;
     });
-    playerHint.textContent = webRtcAvailable ? "" : "WebRTC 未启用，使用兼容模式";
+    playerHint.textContent = INGRESS_MODE
+      ? "HA 侧边栏使用同源兼容模式"
+      : (webRtcAvailable ? "" : "WebRTC 未启用，使用兼容模式");
   }
 
   function liveMime() {
@@ -721,6 +729,7 @@
     liveState.objectUrl = URL.createObjectURL(source);
     liveState.hasAudio = !!current.audio_codec;
     liveState.transport = "ws";
+    if (INGRESS_MODE) liveState.transport = "http";
     liveState.wsFallback = false;
     liveState.wsReceived = false;
     source.addEventListener("sourceopen", openSource);
@@ -751,7 +760,8 @@
       liveState.buffer.addEventListener("updateend", function () {
         syncLive(); trimLive(); pumpLive();
       });
-      startLiveSocket();
+      if (liveState.transport === "http") startLiveHttp();
+      else startLiveSocket();
     }
   }
 
@@ -846,7 +856,10 @@
       showNotice("该摄像头没有配置 <code>rtsp_url</code>，只能使用抓图预览。");
       return;
     }
-    if (streamMode === "webrtc" && webRtcAvailable) { startWebRTC(); return; }
+    if (!INGRESS_MODE && streamMode === "webrtc" && webRtcAvailable) {
+      startWebRTC();
+      return;
+    }
     startMSE();
   }
 

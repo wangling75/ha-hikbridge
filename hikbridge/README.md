@@ -22,8 +22,10 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
   snapshot fallback/download, PTZ pad and click-to-toggle talk
 * Standalone WebRTC playback through the bundled go2rtc gateway, with an
   automatic fragmented-MP4 fallback (`/live.mp4`) when WebRTC is unavailable
-* Same-origin WebSocket/MSE fallback (`/live.ws`) for remote HA ingress and
+* Same-origin HTTP/MSE fallback (`/live.mp4`) for remote HA ingress and
   reverse-proxy deployments where the WebRTC media port is not forwarded
+* WebSocket/MSE (`/live.ws`) remains available for direct or reverse-proxy
+  deployments that support WebSocket upgrades
 
 WebRTC does not require Scrypted. The add-on starts go2rtc on media port
 `18554/tcp+udp`, keeps the go2rtc API on `127.0.0.1:11984`, and proxies only
@@ -33,7 +35,8 @@ so Supervisor bridge addresses such as `172.30.32.1` are not advertised to a
 LAN browser. Its internal RTSP relay uses a random loopback port, so HA's own
 `8554` listener is untouched.
 Camera audio is transcoded to Opus for browser WebRTC. Remote HA sidebars use
-the same-origin WebSocket fallback when direct WebRTC media cannot connect.
+the same-origin HTTP/MSE fallback when direct WebRTC media cannot connect;
+this avoids HA ingress WebSocket proxy failures.
 For direct remote WebRTC, forward UDP/TCP 18554 or configure a TURN server in
 `webrtc_ice_servers`.
 Browsers cannot play an
