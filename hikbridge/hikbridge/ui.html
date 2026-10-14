@@ -217,6 +217,10 @@
   </form>
 </div>
 
+<!-- Bundled with the image. Chrome cannot play HLS natively, and Home
+     Assistant serves remote camera video as HLS. A missing file is fine:
+     the player then falls back to the MSE path. -->
+<script src="hls.min.js"></script>
 <script>
 (function () {
   "use strict";
@@ -309,6 +313,7 @@
   // WebRTC port at all.
   function setWebRtcInfo(info) {
     webRtcAvailable = !!info.webrtc;
+    hlsAvailable = !!info.hls;
     webRtcBackend = info.webrtc_backend || "";
     webRtcPort = info.webrtc_port || null;
     updatePlayerUi();
@@ -437,6 +442,10 @@
   // media leaves through HA's port instead of one owned by the plugin.
   var webRtcBackend = "";
   var webRtcPort = null;
+  // HLS comes from the same go2rtc gateway and is what HA's own camera
+  // cards use remotely: a playlist plus short segment requests, which
+  // survives reverse proxies that buffer a long-lived response.
+  var hlsAvailable = false;
   function webRtcAllowed() {
     return webRtcAvailable &&
       (!INGRESS_MODE || webRtcBackend === "home_assistant");
@@ -447,6 +456,7 @@
     mode: "mse", pc: null, remoteStream: null, hasAudio: null,
     watchdog: null, lastFrameAt: 0, retries: 0, webRtcFallback: false,
     webRtcTimer: null,
+    hlsPlayer: null, hlsFallback: false,
     transport: "ws", wsFallback: false, wsReceived: false
   };
 
@@ -457,14 +467,20 @@
       if (b.dataset.player === "webrtc") b.disabled = !webRtcAllowed();
     });
     if (!webRtcAvailable) {
-      playerHint.textContent = "WebRTC 未启用，使用兼容模式";
+      playerHint.textContent = hlsAvailable
+        ? "WebRTC 未启用，使用 HLS"
+        : "WebRTC 未启用，使用兼容模式";
     } else if (INGRESS_MODE && webRtcBackend === "home_assistant") {
       playerHint.textContent = "复用 HA 内置 go2rtc（WebRTC 走 HA 的 "
-        + (webRtcPort || "") + " 端口，连不上自动回退兼容模式）";
+        + (webRtcPort || "") + " 端口，连不上自动回退 HLS）";
     } else if (INGRESS_MODE) {
-      playerHint.textContent = "HA 侧边栏使用同源兼容模式";
+      playerHint.textContent = hlsAvailable
+        ? "远程走 HLS，只需访问 HA"
+        : "HA 侧边栏使用同源兼容模式";
     } else {
-      playerHint.textContent = "";
+      playerHint.textContent = hlsAvailable
+        ? "WebRTC 连不上时自动回退 HLS"
+        : "";
     }
   }
 
@@ -543,6 +559,10 @@
     if (liveState.abort) { try { liveState.abort.abort(); } catch (e) {} }
     if (liveState.ws) { try { liveState.ws.close(); } catch (e) {} }
     if (liveState.pc) { try { liveState.pc.close(); } catch (e) {} }
+    if (liveState.hlsPlayer) {
+      try { liveState.hlsPlayer.destroy(); } catch (e) {}
+      liveState.hlsPlayer = null;
+    }
     if (liveState.source && liveState.source.readyState === "open") {
       try { liveState.source.endOfStream(); } catch (e) {}
     }
@@ -769,6 +789,65 @@
     });
   }
 
+  function hlsSupported() {
+    var Ctor = window.Hls;
+    if (Ctor && Ctor.isSupported && Ctor.isSupported()) return true;
+    return !!live.canPlayType &&
+      live.canPlayType("application/vnd.apple.mpegurl") !== "";
+  }
+
+  function handleHlsFailure(message) {
+    if (!liveState.active) return;
+    if (liveState.hlsFallback) { failLive(new Error(message)); return; }
+    liveState.hlsFallback = true;
+    log(message + "，切换到兼容模式…", "e");
+    stopLive(false);
+    setTimeout(startMSE, 200);
+  }
+
+  function startHls() {
+    stopLive(false);
+    notice.classList.add("hide");
+    liveState.mode = "hls";
+    liveState.hlsFallback = false;
+    liveState.active = true;
+    liveState.hasAudio = !!current.audio_codec;
+    live.style.display = "none";
+    snap.style.display = "";
+    snapMsg.textContent = "正在连接实时画面…";
+    snapMsg.classList.remove("hide");
+    setLiveUi(true, liveState.hasAudio);
+    live.muted = false;
+    live.volume = 1;
+    var url = withToken(BASE + camPath(current.id, "/hls/index.m3u8"));
+    var Ctor = window.Hls;
+    if (Ctor && Ctor.isSupported && Ctor.isSupported()) {
+      var player = new Ctor({
+        lowLatencyMode: true,
+        liveSyncDurationCount: 2,
+        maxBufferLength: 6,
+        manifestLoadingTimeOut: 8000
+      });
+      liveState.hlsPlayer = player;
+      player.on(Ctor.Events.ERROR, function (evt, data) {
+        if (!liveState.active || liveState.mode !== "hls") return;
+        if (data && data.fatal) handleHlsFailure("HLS 播放失败");
+      });
+      player.attachMedia(live);
+      player.loadSource(url);
+    } else {
+      live.src = url;  // Safari and iOS play HLS natively
+    }
+    live.play().then(function () {
+      setLiveUi(true, liveState.hasAudio);
+    }).catch(function () {
+      live.muted = true;
+      setLiveUi(true, liveState.hasAudio);
+      live.play().catch(function () {});
+    });
+    startLiveWatchdog();
+  }
+
   function startMSE() {
     var MS = window.MediaSource || window.ManagedMediaSource;
     if (!MS) {
@@ -914,6 +993,16 @@
       startWebRTC();
       return;
     }
+    // Prefer HLS over the MSE compatibility mode whenever go2rtc can
+    // serve it. Inside the HA sidebar every request then stays on HA's
+    // HTTP port, and standalone deployments behind a domain proxy get
+    // the same short-request behaviour that keeps HA's own cards alive
+    // remotely. A buffering reverse proxy stalls one long MSE response
+    // but cannot stall a playlist plus short segments.
+    if (hlsAvailable && hlsSupported() && !liveState.hlsFallback) {
+      startHls();
+      return;
+    }
     startMSE();
   }
 
@@ -922,6 +1011,7 @@
     if (!b || b.disabled) return;
     streamMode = b.dataset.player;
     liveState.webRtcFallback = false;
+    liveState.hlsFallback = false;
     localStorage.setItem("hikbridge.player", streamMode);
     updatePlayerUi();
     if (liveState.active) {
@@ -950,14 +1040,17 @@
     snapMsg.classList.add("hide");
     frame.classList.add("live-on");
     touchLive();
-    setStatus(true, liveState.mode === "webrtc" ? "WebRTC 实时画面" : "实时画面");
+    setStatus(true, liveState.mode === "webrtc" ? "WebRTC 实时画面"
+      : (liveState.mode === "hls" ? "HLS 实时画面" : "实时画面"));
   });
   live.addEventListener("timeupdate", function () { touchLive(); syncLive(); });
   live.addEventListener("ended", function () {
     if (liveState.active) restartLive("视频流已结束");
   });
   live.addEventListener("error", function () {
-    if (liveState.active) failLive(new Error("视频解码失败"));
+    if (!liveState.active) return;
+    if (liveState.mode === "hls") { handleHlsFailure("HLS 播放失败"); return; }
+    failLive(new Error("视频解码失败"));
   });
 
   // ---- 云台 ----

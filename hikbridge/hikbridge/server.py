@@ -41,7 +41,7 @@ import time
 import hikbridge  # absolute self-import: reads the live timezone status
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from . import __version__
 from .go2rtc import Go2RTCError, Go2RTCManager
@@ -63,6 +63,38 @@ _LIVE_STALE_TIMEOUT = 20.0
 _UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html")
 _ui_cache: bytes | None = None
 _ui_lock = threading.Lock()
+
+# Chrome cannot play HLS natively and Home Assistant serves remote camera
+# video as HLS, so the image bundles hls.js. A missing copy (or a
+# truncated download at build time) just means the UI keeps using its
+# MSE path.
+_HLSJS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "hls.min.js"
+)
+_hlsjs_cache: bytes | None = None
+_hlsjs_missing = False
+_hlsjs_lock = threading.Lock()
+
+
+def _hlsjs() -> bytes | None:
+    """Return the bundled hls.js, or None when the image has no usable copy."""
+    global _hlsjs_cache, _hlsjs_missing
+    with _hlsjs_lock:
+        if _hlsjs_cache is not None or _hlsjs_missing:
+            return _hlsjs_cache
+        try:
+            with open(_HLSJS_PATH, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            _hlsjs_missing = True
+            _LOGGER.info("hls.js is not bundled; HLS playback stays Safari-only")
+            return None
+        if len(data) < 1024:  # placeholder left by a failed download
+            _hlsjs_missing = True
+            _LOGGER.info("hls.js is empty; HLS playback stays Safari-only")
+            return None
+        _hlsjs_cache = data
+        return _hlsjs_cache
 
 
 def _ui_page() -> bytes:
@@ -249,6 +281,17 @@ def _handler(state: _State):
                 self._json(200, {"ok": True, "required": bool(state.token)})
                 return
 
+            if path == "/hls.min.js":
+                # Served before the token check: the page loads it with a
+                # plain <script> tag and it holds nothing sensitive.
+                script = _hlsjs()
+                if script is None:
+                    self._send(404, b"", "text/plain")
+                    return
+                self._send(200, script, "application/javascript; charset=utf-8",
+                           {"Cache-Control": "max-age=86400"})
+                return
+
             if not self._authorised(query):
                 return
 
@@ -263,6 +306,10 @@ def _handler(state: _State):
                         "timezone_status": hikbridge.timezone_status,
                         "https_port": state.https_port,
                         "webrtc": bool(state.webrtc and state.webrtc.available),
+                        # HLS is served by the same gateway and is what the UI
+                        # uses for remote playback: playlists and short
+                        # segments only, so no long-lived response is needed.
+                        "hls": bool(state.webrtc and state.webrtc.available),
                         # "home_assistant" means the plugin reused HA's own
                         # go2rtc, so no plugin port has to be reachable.
                         "webrtc_backend": (
@@ -302,6 +349,9 @@ def _handler(state: _State):
                     return
                 if action == "live.ws":
                     self._live_ws(entry)
+                    return
+                if action.startswith("hls/"):
+                    self._hls(entry, action, query)
                     return
                 if action == "talk":
                     self._talk(entry)
@@ -444,6 +494,83 @@ def _handler(state: _State):
                 self._json(502, {"ok": False, "error": str(exc)})
                 return
             self._json(200, {"ok": True, "type": "answer", "sdp": answer})
+
+        def _hls(self, entry: CameraEntry, action: str, query: dict) -> None:
+            """Re-serve go2rtc's HLS so remote playback only needs HA's port.
+
+            Home Assistant's own camera cards fall back to HLS when WebRTC
+            is not reachable, and that is what keeps remote viewing alive:
+            the browser asks for a small playlist plus short segments over
+            the HA HTTP port instead of holding one long chunked response
+            open. A reverse proxy that buffers streaming responses stalls
+            the single-response MSE path; it cannot stall HLS.
+            """
+            if state.webrtc is None or not state.webrtc.available:
+                reason = state.webrtc.error if state.webrtc else "WebRTC is disabled"
+                self._json(503, {"ok": False, "error": reason or "no gateway"})
+                return
+            name = state.webrtc.stream_name(entry)
+            file_name = action.split("/", 1)[1]
+
+            def rewrite_playlist(payload: bytes) -> bytes:
+                """Make every URL in a playlist relative to this endpoint.
+
+                go2rtc answers the master with ``hls/playlist.m3u8?id=..``,
+                and the media playlist with ``segment.ts?id=..``. A
+                <video>/hls.js resolves those against the playlist URL and
+                does not inherit its query string, so the token has to be
+                appended to each line here.
+                """
+                lines = []
+                for line in payload.decode("utf-8", "replace").splitlines():
+                    if line and not line.startswith("#"):
+                        if line.startswith("hls/"):
+                            line = line[len("hls/"):]
+                        if state.token:
+                            line += ("&" if "?" in line else "?") + \
+                                "token=" + quote(state.token, safe="")
+                    lines.append(line)
+                return ("\n".join(lines) + "\n").encode("utf-8")
+
+            try:
+                if file_name in ("index.m3u8", "master.m3u8"):
+                    status, _ctype, body = state.webrtc.proxy(
+                        "/api/stream.m3u8?" + urlencode({"src": name})
+                    )
+                    if status != 200:
+                        self._json(502, {
+                            "ok": False,
+                            "error": f"go2rtc HLS answered HTTP {status}",
+                        })
+                        return
+                    self._send(200, rewrite_playlist(body),
+                               "application/vnd.apple.mpegurl",
+                               {"Cache-Control": "no-store"})
+                    return
+
+                path = "/api/hls/" + file_name
+                if query:
+                    path += "?" + urlencode(query, doseq=True)
+                status, content_type, body = state.webrtc.proxy(path, timeout=25.0)
+                if status != 200:
+                    self._send(status, body or b"", content_type or "text/plain")
+                    return
+                if file_name.endswith(".m3u8"):
+                    # The media playlist also lists segment.ts URLs, and
+                    # those need the same token treatment as the master.
+                    self._send(200, rewrite_playlist(body),
+                               "application/vnd.apple.mpegurl",
+                               {"Cache-Control": "no-store"})
+                    return
+                if not content_type:
+                    if file_name.endswith(".ts"):
+                        content_type = "video/mp2t"
+                    else:
+                        content_type = "video/mp4"
+                self._send(200, body, content_type,
+                           {"Cache-Control": "no-store"})
+            except Go2RTCError as exc:
+                self._json(502, {"ok": False, "error": str(exc)})
 
         def _live_command(self, entry: CameraEntry) -> list[str]:
             """Build the low-CPU fragmented MP4 command shared by both transports."""

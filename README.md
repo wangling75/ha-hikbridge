@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.21
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.22
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.21
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.21 ./hikbridge
+docker build -t hikbridge:0.2.22 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -188,7 +188,9 @@ cp options.example.json options.json
 
 内置 go2rtc 是上游 [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc) 的 `v1.9.14`（MIT 许可）。
 
-远程通过 HA 域名打开侧边栏时，默认走同源 `/live.mp4` HTTP 兼容模式（约 1～3 秒延时），只靠 HA 的 `8123` 就能看，也不会再撞 HA ingress 的 WebSocket 代理。这正是 HA 自带 WebRTC 摄像头卡片的做法：WebRTC 能连就用，连不上就回退 HLS/MSE。HA 内置 go2rtc 的 WebRTC 媒体端口是 `18555/tcp`，把它转发到 HA 主机（或在 `webrtc_ice_servers` 里配 TURN）之后，远程才会走真正的 WebRTC，HA 自己的摄像头卡片和 Hikbridge 侧边栏同时受益。侧边栏里手动点「WebRTC」会先尝试连接，6 秒内没建立媒体连接就自动回到兼容模式。
+远程通过 HA 域名打开侧边栏时，默认走 **HLS**，只靠 HA 的 `8123` 就能看，而且这正是 HA 自带摄像头卡片远程能播的原因：浏览器不再维持一条长时间不结束的 HTTP 流（旧版 `/live.mp4` 兼容模式），而是先取一小段 playlist、再一段段拉短分片。公网域名、反向代理和 Cloudflare 这类中间层会缓冲“一个永不结束的响应”，所以旧版 MSE 兼容模式远程经常冻屏；HLS 每个请求都很快返回，不受这个影响。Chrome/Firefox 由镜像内置的 hls.js 播放，Safari/iOS 原生播放。侧边栏里手动点「WebRTC」会先尝试直连，6 秒内没建立媒体连接就自动回到 HLS。
+
+远程如果要走真正的 WebRTC（更低延时），需要把 HA 内置 go2rtc 的 `18555/tcp` 转发到 HA 主机，或者在 `webrtc_ice_servers` 里配 TURN；两者都没有时，远程就用 HLS，本地局域网仍然优先 WebRTC。
 
 纯 Docker 使用 `-p` 端口映射时，把 Docker 主机的地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:18554"]`；动态公网 IP 可以写成 `"stun:18554"`，由 STUN 自动发现公网地址。
 
@@ -210,7 +212,7 @@ docker run -d \
   -p 18554:18554/udp \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.21
+  ghcr.io/wangling75/amd64-hikbridge:0.2.22
 ```
 
 查看日志：
@@ -389,3 +391,12 @@ POST /speak_raw?rate=8000    body = raw PCM16, encoded for the camera
   速率推送。
 - 语音链路需要 ALSA 有一个可用的播放设备；插件用 `ALSA_CONFIG_PATH`
   指向自带的 null 设备配置，所以容器里没有声卡也能工作。
+
+## 旧版单摄像头设置为何可以删
+
+早先那 5 个顶层设置（`camera_ip` / `camera_port` / `username` /
+`password` / `channel`）是单摄像头时代遗留的。它们只是把同样的值再写一遍
+到 `cameras[0]`，删除它们不会影响远程播放。远程之前冻屏的根因在
+播放链路，不在配置项：旧版远程兼容模式是一条不结束的 `/live.mp4` 长连接，
+被反向代理/域名缓冲后就卡住了。新版远程改走 HLS，每个请求都很短，所以
+只访问 HA 的 `8123` 就能稳定播放。

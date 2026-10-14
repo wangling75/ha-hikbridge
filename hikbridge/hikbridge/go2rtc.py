@@ -161,6 +161,36 @@ class Go2RTCManager:
     def stream_names(self) -> dict[str, object]:
         return dict(self._names)
 
+    def stream_name(self, entry) -> str:
+        """Return the go2rtc stream name used for one camera."""
+        return _stream_name(entry)
+
+    def proxy(self, path: str, timeout: float = 15.0) -> tuple[int, str, bytes]:
+        """Fetch a go2rtc HTTP endpoint so the add-on can re-serve it.
+
+        This is what makes HLS work the way Home Assistant's own camera
+        cards do remotely: the browser keeps talking to the HA HTTP port,
+        and every playlist or segment request is a short round trip that
+        survives proxies which buffer long-lived streaming responses.
+        """
+        base = self.external_api or f"http://127.0.0.1:{self.api_port}"
+        request = urllib.request.Request(f"{base}{path}")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return (
+                    int(response.status),
+                    str(response.headers.get("Content-Type") or ""),
+                    response.read(),
+                )
+        except urllib.error.HTTPError as exc:
+            return (
+                int(exc.code),
+                str(exc.headers.get("Content-Type") or ""),
+                exc.read(),
+            )
+        except (OSError, urllib.error.URLError) as exc:
+            raise Go2RTCError(f"go2rtc API unavailable: {exc}") from exc
+
     def status(self) -> dict:
         return {
             "enabled": self.configured,

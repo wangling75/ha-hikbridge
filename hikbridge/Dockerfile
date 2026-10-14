@@ -10,6 +10,19 @@ ARG GO2RTC_VERSION=v1.9.14
 ADD https://github.com/AlexxIT/go2rtc/releases/download/${GO2RTC_VERSION}/go2rtc_linux_amd64 /go2rtc
 RUN chmod 0755 /go2rtc && /go2rtc -version
 
+# hls.js lets Chrome/Firefox play the HLS stream the same way Home
+# Assistant's own camera cards do remotely. Safari plays HLS natively and
+# does not need it, so a failed download only disables that one path.
+FROM alpine:3.20 AS hlsjs
+ARG HLSJS_VERSION=1.5.17
+RUN apk add --no-cache curl \
+    && (curl -fsSL -o /hls.min.js \
+          "https://cdn.jsdelivr.net/npm/hls.js@${HLSJS_VERSION}/dist/hls.min.js" \
+        || curl -fsSL -o /hls.min.js \
+          "https://unpkg.com/hls.js@${HLSJS_VERSION}/dist/hls.min.js") \
+    && test "$(wc -c < /hls.min.js)" -gt 100000 \
+    && grep -qi "hls.js" /hls.min.js
+
 FROM ${BUILD_FROM}
 
 ARG APT_MIRROR=deb.debian.org
@@ -36,6 +49,8 @@ COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=go2rtc /go2rtc /usr/local/bin/go2rtc
 COPY hikbridge /opt/hikbridge/hikbridge
 COPY hcnetsdk /opt/hikbridge/hcnetsdk
+# Copied after the source tree so the downloaded bundle always wins.
+COPY --from=hlsjs /hls.min.js /opt/hikbridge/hikbridge/hls.min.js
 COPY run.sh /run.sh
 RUN chmod a+x /run.sh
 
