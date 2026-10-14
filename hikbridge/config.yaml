@@ -1,5 +1,5 @@
 name: "Hikvision PTZ Bridge"
-version: "0.2.14"
+version: "0.2.15"
 slug: "hikbridge"
 description: "PTZ control, snapshots, live two-way talk and speaker playback for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
 url: "https://github.com/wangling75/ha-hikbridge"
@@ -52,4 +52,5 @@ schema:
   webrtc: bool?
   webrtc_port: port?
   webrtc_api_port: port?
-  webrtc_candidates: [str]?
+  webrtc_candidates:
+    - str?
