@@ -128,10 +128,19 @@
 
 <main>
   <section class="panel">
-    <div class="frame">
+    <div class="frame" id="frame">
       <video id="live" controls playsinline autoplay muted></video>
       <img id="snap" alt="">
       <div class="snapmsg" id="snapMsg">正在加载画面…</div>
+    </div>
+    <div class="row">
+      <label>播放</label>
+      <div class="seg" id="playerSeg">
+        <button data-player="webrtc" class="on">WebRTC</button>
+        <button data-player="mse">兼容模式</button>
+      </div>
+      <span class="grow"></span>
+      <span class="muted" id="playerHint"></span>
     </div>
     <div class="row">
       <label>刷新</label>
@@ -226,6 +235,7 @@
   var snap = $("snap"), snapMsg = $("snapMsg"), snapTime = $("snapTime");
   var live = $("live"), liveToggle = $("liveToggle"), soundToggle = $("soundToggle");
   var logBox = $("log"), tabsBox = $("tabs"), notice = $("notice");
+  var frame = $("frame"), playerSeg = $("playerSeg"), playerHint = $("playerHint");
   var talkBtn = $("talk"), fileInput = $("file"), fileInfo = $("fileInfo");
   var padButtons = Array.prototype.slice.call(document.querySelectorAll("[data-dir]"));
   var stopBtn = $("stop");
@@ -295,6 +305,8 @@
       cameras = (info.cameras && info.cameras.length)
         ? info.cameras
         : [{ id: "", name: info.serial || "camera", serial: info.serial }];
+      webRtcAvailable = !!info.webrtc;
+      updatePlayerUi();
       buildTabs();
       select(cameras[0].id);
       setStatus(true, "已连接 · " + cameras.length + " 台摄像头");
@@ -325,6 +337,7 @@
     stopTalk();
     liveState.restarting = false;
     stopLive(false);
+    liveState.webRtcFallback = false;
     current = cameras.filter(function (c) { return c.id === id; })[0] || cameras[0];
     Array.prototype.forEach.call(tabsBox.children, function (b) {
       b.classList.toggle("on", b.dataset.id === current.id);
@@ -397,14 +410,27 @@
     log("已请求抓图下载");
   });
 
-  // ---- 实时画面：RTSP 在服务端转成分片 MP4，再由 MSE 播放音频和视频 ----
+  // ---- 实时画面：优先 WebRTC，失败自动回退 MSE/RTSP relay ----
   var LIVE_KEEP_SECONDS = 3;
   var LIVE_MAX_LAG = 1.2;
   var LIVE_MAX_QUEUE_BYTES = 8 * 1024 * 1024;
+  var streamMode = localStorage.getItem("hikbridge.player") || "webrtc";
+  var webRtcAvailable = false;
   var liveState = {
     source: null, buffer: null, abort: null, objectUrl: null,
-    queue: [], queueBytes: 0, active: false, restarting: false
+    queue: [], queueBytes: 0, active: false, restarting: false,
+    mode: "mse", pc: null, remoteStream: null, hasAudio: null,
+    watchdog: null, lastFrameAt: 0, retries: 0, webRtcFallback: false
   };
+
+  function updatePlayerUi() {
+    if (!webRtcAvailable && streamMode === "webrtc") streamMode = "mse";
+    Array.prototype.forEach.call(playerSeg.children, function (b) {
+      b.classList.toggle("on", b.dataset.player === streamMode);
+      if (b.dataset.player === "webrtc") b.disabled = !webRtcAvailable;
+    });
+    playerHint.textContent = webRtcAvailable ? "" : "WebRTC 未启用，使用兼容模式";
+  }
 
   function liveMime() {
     var MS = window.MediaSource || window.ManagedMediaSource;
@@ -429,24 +455,55 @@
     return "";
   }
 
-  function setLiveUi(on) {
+  function setLiveUi(on, hasAudio) {
     liveToggle.textContent = on ? "关闭实时" : "实时画面";
-    soundToggle.disabled = !on;
-    if (!on) soundToggle.textContent = "开启声音";
+    if (!on) {
+      soundToggle.textContent = "开启声音";
+      soundToggle.disabled = true;
+    } else if (hasAudio === false) {
+      soundToggle.textContent = "无音轨";
+      soundToggle.disabled = true;
+    } else {
+      soundToggle.disabled = false;
+      soundToggle.textContent = live.muted ? "开启声音" : "声音已开启";
+    }
+  }
+
+  function clearLiveWatchdog() {
+    if (liveState.watchdog) {
+      clearInterval(liveState.watchdog);
+      liveState.watchdog = null;
+    }
+  }
+
+  function touchLive() { liveState.lastFrameAt = Date.now(); }
+
+  function startLiveWatchdog() {
+    clearLiveWatchdog();
+    touchLive();
+    liveState.watchdog = setInterval(function () {
+      if (!liveState.active || liveState.restarting) return;
+      if (Date.now() - liveState.lastFrameAt > 7000) restartLive("画面超过 7 秒没有推进");
+    }, 2000);
   }
 
   function stopLive(resumeSnap) {
-    if (resumeSnap !== false) liveState.restarting = false;
-    liveState.active = false;
-    if (liveState.abort) {
-      try { liveState.abort.abort(); } catch (e) {}
+    if (resumeSnap !== false) {
+      liveState.restarting = false;
+      liveState.retries = 0;
     }
+    liveState.active = false;
+    clearLiveWatchdog();
+    if (liveState.abort) { try { liveState.abort.abort(); } catch (e) {} }
+    if (liveState.pc) { try { liveState.pc.close(); } catch (e) {} }
     if (liveState.source && liveState.source.readyState === "open") {
       try { liveState.source.endOfStream(); } catch (e) {}
     }
     liveState.source = null;
     liveState.buffer = null;
     liveState.abort = null;
+    liveState.pc = null;
+    liveState.remoteStream = null;
     liveState.queue = [];
     liveState.queueBytes = 0;
     if (liveState.objectUrl) {
@@ -454,10 +511,13 @@
       liveState.objectUrl = null;
     }
     try { live.pause(); } catch (e) {}
+    try { live.srcObject = null; } catch (e) {}
     live.removeAttribute("src");
     try { live.load(); } catch (e) {}
     live.style.display = "none";
     snap.style.display = "";
+    frame.classList.remove("live-on");
+    liveState.hasAudio = null;
     setLiveUi(false);
     if (resumeSnap !== false && snapRate > 0) loadSnap();
   }
@@ -480,9 +540,6 @@
     if (!liveState.active || live.seeking) return;
     var end = liveBufferedEnd();
     if (end === null) return;
-    // Keep the decoder close to the live edge. Without this, a slow
-    // rendering/decoding interval can leave the player seconds behind
-    // while the network stream continues arriving.
     if (end - live.currentTime > LIVE_MAX_LAG) {
       try { live.currentTime = Math.max(0, end - 0.25); } catch (e) {}
     }
@@ -495,10 +552,7 @@
     var start = sb.buffered.start(0);
     var end = sb.buffered.end(sb.buffered.length - 1);
     var removeTo = end - LIVE_KEEP_SECONDS;
-    // Never remove data immediately behind the play head.
-    if (live.currentTime > start) {
-      removeTo = Math.min(removeTo, live.currentTime - 0.5);
-    }
+    if (live.currentTime > start) removeTo = Math.min(removeTo, live.currentTime - 0.5);
     if (removeTo > start + 0.1) {
       try { sb.remove(start, removeTo); } catch (e) {}
     }
@@ -523,16 +577,23 @@
     }
   }
 
-  function restartLive() {
+  function restartLive(reason) {
     if (!liveState.active || liveState.restarting) return;
+    liveState.retries += 1;
+    if (liveState.retries > 5) {
+      var message = (reason || "视频流中断") + "，自动重连多次仍失败";
+      stopLive();
+      showNotice("实时画面已停止。<br>" + message);
+      return;
+    }
     liveState.restarting = true;
     var id = current && current.id;
-    log("实时画面积压，正在重新连接…", "e");
+    log((reason || "实时画面中断") + "，正在重新连接…", "e");
     stopLive(false);
     setTimeout(function () {
       liveState.restarting = false;
       if (current && current.id === id) startLive();
-    }, 350);
+    }, Math.min(500 * liveState.retries, 2500));
   }
 
   function enqueueLive(chunk) {
@@ -540,17 +601,104 @@
     liveState.queue.push(chunk);
     liveState.queueBytes += chunk.byteLength || chunk.length;
     if (liveState.queueBytes > LIVE_MAX_QUEUE_BYTES) {
-      restartLive();
+      restartLive("实时画面积压");
       return;
     }
     pumpLive();
   }
 
-  function startLive() {
-    if (!current || !current.live) {
-      showNotice("该摄像头没有配置 <code>rtsp_url</code>，只能使用抓图预览。");
+  function handleWebRTCFailure(err) {
+    if (!liveState.webRtcFallback) {
+      liveState.webRtcFallback = true;
+      streamMode = "mse";
+      updatePlayerUi();
+      log("WebRTC 不可用，切换到兼容模式：" + (err && err.message ? err.message : err), "e");
+      stopLive(false);
+      setTimeout(startLive, 250);
       return;
     }
+    failLive(err);
+  }
+
+  function waitForIce(pc) {
+    if (pc.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise(function (resolve) {
+      var timer = setTimeout(done, 2500);
+      function done() {
+        clearTimeout(timer);
+        pc.removeEventListener("icegatheringstatechange", changed);
+        resolve();
+      }
+      function changed() { if (pc.iceGatheringState === "complete") done(); }
+      pc.addEventListener("icegatheringstatechange", changed);
+    });
+  }
+
+  function startWebRTC() {
+    var Ctor = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+    if (!Ctor) { handleWebRTCFailure(new Error("浏览器不支持 WebRTC")); return; }
+    stopLive(false);
+    notice.classList.add("hide");
+    var pc = new Ctor({ iceServers: [] });
+    var remote = new MediaStream();
+    liveState.mode = "webrtc";
+    liveState.pc = pc;
+    liveState.remoteStream = remote;
+    liveState.hasAudio = !!current.audio_codec;
+    liveState.active = true;
+    live.srcObject = remote;
+    live.style.display = "none";
+    snap.style.display = "";
+    snapMsg.textContent = "正在连接 WebRTC…";
+    snapMsg.classList.remove("hide");
+    setLiveUi(true, liveState.hasAudio);
+    pc.addTransceiver("video", { direction: "recvonly" });
+    if (liveState.hasAudio) pc.addTransceiver("audio", { direction: "recvonly" });
+    pc.ontrack = function (ev) {
+      if (ev.streams && ev.streams[0]) {
+        liveState.remoteStream = ev.streams[0];
+        live.srcObject = ev.streams[0];
+      } else if (ev.track && remote.getTracks().indexOf(ev.track) < 0) {
+        remote.addTrack(ev.track);
+      }
+      if (ev.track && ev.track.kind === "audio") {
+        liveState.hasAudio = true;
+        setLiveUi(true, true);
+      }
+      touchLive();
+      live.muted = false;
+      live.volume = 1;
+      live.play().then(function () {
+        setLiveUi(true, liveState.hasAudio);
+      }).catch(function () {
+        live.muted = true;
+        setLiveUi(true, liveState.hasAudio);
+        live.play().catch(function () {});
+      });
+    };
+    pc.onconnectionstatechange = function () {
+      if (pc.connectionState === "failed" && liveState.active) restartLive("WebRTC 连接失败");
+    };
+    pc.createOffer().then(function (offer) {
+      return pc.setLocalDescription(offer);
+    }).then(function () {
+      return waitForIce(pc);
+    }).then(function () {
+      return post(camPath(current.id, "/webrtc"), { sdp: pc.localDescription.sdp });
+    }).then(function (resp) {
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      return resp.json();
+    }).then(function (answer) {
+      if (!answer.ok) throw new Error(answer.error || "WebRTC SDP 交换失败");
+      return pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+    }).then(function () {
+      startLiveWatchdog();
+    }).catch(function (e) {
+      if (liveState.active) handleWebRTCFailure(e);
+    });
+  }
+
+  function startMSE() {
     var MS = window.MediaSource || window.ManagedMediaSource;
     if (!MS) {
       showNotice("当前浏览器不支持实时 MP4 播放，已保留抓图预览。");
@@ -559,30 +707,25 @@
     stopLive(false);
     notice.classList.add("hide");
     var source = new MS();
+    liveState.mode = "mse";
     liveState.source = source;
     liveState.objectUrl = URL.createObjectURL(source);
+    liveState.hasAudio = !!current.audio_codec;
     source.addEventListener("sourceopen", openSource);
     live.src = liveState.objectUrl;
-    live.style.display = "block";
-    // Keep the latest snapshot visible while ffmpeg negotiates RTSP and
-    // waits for the first decodable frame; the video is revealed on play.
+    live.style.display = "none";
+    snap.style.display = "";
     snapMsg.textContent = "正在连接实时画面…";
     snapMsg.classList.remove("hide");
-    live.muted = true;
     liveState.active = true;
-    setLiveUi(true);
-    // 实时画面按钮本身就是用户手势，优先直接带声音播放。若浏览器
-    // 仍拦截自动播放，再退回静音并保留“开启声音”按钮。
+    setLiveUi(true, liveState.hasAudio);
     live.muted = false;
     live.volume = 1;
-    soundToggle.textContent = "正在开启声音…";
     live.play().then(function () {
-      soundToggle.textContent = "声音已开启";
-      soundToggle.disabled = true;
+      setLiveUi(true, liveState.hasAudio);
     }).catch(function () {
       live.muted = true;
-      soundToggle.textContent = "开启声音";
-      soundToggle.disabled = false;
+      setLiveUi(true, liveState.hasAudio);
       live.play().catch(function () {});
     });
     function openSource() {
@@ -593,9 +736,7 @@
       catch (e) { failLive(e); return; }
       liveState.buffer.mode = "segments";
       liveState.buffer.addEventListener("updateend", function () {
-        syncLive();
-        trimLive();
-        pumpLive();
+        syncLive(); trimLive(); pumpLive();
       });
       var controller = new AbortController();
       liveState.abort = controller;
@@ -605,44 +746,73 @@
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         if (!resp.body || !resp.body.getReader) throw new Error("浏览器不支持流式响应");
         var reader = resp.body.getReader();
+        startLiveWatchdog();
         (function read() {
           reader.read().then(function (result) {
-            if (result.done) return;
+            if (result.done) {
+              if (liveState.active) restartLive("实时流已结束");
+              return;
+            }
             enqueueLive(new Uint8Array(result.value));
             read();
           }).catch(function (e) {
-            if (e.name !== "AbortError") failLive(e);
+            if (e.name !== "AbortError" && liveState.active) failLive(e);
           });
         })();
       }).catch(function (e) {
-        if (e.name !== "AbortError") failLive(e);
+        if (e.name !== "AbortError" && liveState.active) failLive(e);
       });
     }
   }
+
+  function startLive() {
+    if (!current || !current.live) {
+      showNotice("该摄像头没有配置 <code>rtsp_url</code>，只能使用抓图预览。");
+      return;
+    }
+    if (streamMode === "webrtc" && webRtcAvailable) { startWebRTC(); return; }
+    startMSE();
+  }
+
+  playerSeg.addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-player]");
+    if (!b || b.disabled) return;
+    streamMode = b.dataset.player;
+    liveState.webRtcFallback = false;
+    localStorage.setItem("hikbridge.player", streamMode);
+    updatePlayerUi();
+    if (liveState.active) {
+      stopLive(false);
+      setTimeout(startLive, 200);
+    } else if (current && current.live) startLive();
+  });
 
   liveToggle.addEventListener("click", function () {
     if (liveState.active || liveState.restarting) {
       liveState.restarting = false;
       stopLive();
-    } else {
-      startLive();
-    }
+    } else startLive();
   });
   soundToggle.addEventListener("click", function () {
-    if (!liveState.active) return;
+    if (!liveState.active || liveState.hasAudio === false) return;
     live.muted = false;
     live.volume = 1;
     live.play().then(function () {
-      soundToggle.textContent = "声音已开启";
-      soundToggle.disabled = true;
+      setLiveUi(true, liveState.hasAudio);
     }).catch(function (e) { log("声音开启失败：" + e.message, "e"); });
   });
   live.addEventListener("playing", function () {
+    live.style.display = "block";
     snap.style.display = "none";
     snapMsg.classList.add("hide");
-    setStatus(true, "实时画面");
+    frame.classList.add("live-on");
+    touchLive();
+    setStatus(true, liveState.mode === "webrtc" ? "WebRTC 实时画面" : "实时画面");
   });
-  live.addEventListener("timeupdate", syncLive);
+  live.addEventListener("timeupdate", function () { touchLive(); syncLive(); });
+  live.addEventListener("ended", function () {
+    if (liveState.active) restartLive("视频流已结束");
+  });
   live.addEventListener("error", function () {
     if (liveState.active) failLive(new Error("视频解码失败"));
   });
@@ -1069,10 +1239,19 @@
     loadCameras();
     fetch(withToken(BASE + "/health"))
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (info) { if (info && info.https_port) httpsPort = info.https_port; })
+      .then(function (info) {
+        if (!info) return;
+        if (info.https_port) httpsPort = info.https_port;
+        webRtcAvailable = !!info.webrtc;
+        updatePlayerUi();
+      })
       .catch(function () {});
     setInterval(function () {
-      api("/health").then(function () { setStatus(true, "已连接"); })
+      api("/health").then(function (r) { return r.json(); }).then(function (info) {
+        webRtcAvailable = !!info.webrtc;
+        updatePlayerUi();
+        setStatus(true, "已连接");
+      })
         .catch(function () { setStatus(false, "网桥无响应"); });
     }, 20000);
   }

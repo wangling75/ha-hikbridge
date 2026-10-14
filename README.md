@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.13
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.14
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.13
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.13 ./hikbridge
+docker build -t hikbridge:0.2.14 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -161,12 +161,25 @@ cp options.example.json options.json
   "speak_sample_rate": "16000",
   "auth_token": "CHANGE_ME_TOKEN",
   "ssl": false,
-  "ssl_port": 8655
+  "ssl_port": 8655,
+  "webrtc": true,
+  "webrtc_port": 8555,
+  "webrtc_api_port": 1984,
+  "webrtc_candidates": []
 }
 ```
 
 `auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 是后备输入采样率；插件登录后会优先使用摄像头实际声明的编码和采样率。
-`ssl: true` 时插件会在 `ssl_port`（默认 8655）额外开一个 HTTPS 监听，用自签证书，浏览器只需确认一次就能用网页「点击开始喊话」；`8654` 的明文 HTTP 保持不变，HA 侧边栏和 Scrypted 都不受影响。网页实时画面通过 `/live.mp4` 把 RTSP 视频和音频转给浏览器；点击「实时画面」时会优先直接带声音播放，浏览器若拦截自动播放则自动静音，并可用「开启声音」恢复。
+
+网页默认使用插件内置的 **go2rtc WebRTC**，不安装 Scrypted 也能直接看带声音的实时画面。WebRTC 媒体端口是 `8555/tcp+udp`，go2rtc 管理 API 只监听容器内的 `127.0.0.1:1984`，不会暴露到局域网。WebRTC 不可用时，页面会自动回退到 `/live.mp4` 兼容模式。
+
+内置 go2rtc 是上游 [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc) 的 `v1.9.14`（MIT 许可）。
+
+HA add-on 使用 host 网络，`webrtc_candidates` 保持 `[]` 即可。纯 Docker 如果使用 `-p` 端口映射，需要把 Docker 主机的局域网地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:8555"]`；否则 SDP 会返回容器内网 IP，远程浏览器无法建立媒体连接。
+
+浏览器不能直接播放 `rtsp://`。HA 里的 RTSP 卡片能播放，是因为 HA/go2rtc 在服务端取流后再转给浏览器；Hikbridge 现在也内置了同样的转换，所以不需要 Scrypted。没有音轨的摄像头（例如 225）会显示「无音轨」，不会误开对讲。
+
+`ssl: true` 时插件会在 `ssl_port`（默认 8655）额外开一个 HTTPS 监听，用自签证书，浏览器只需确认一次就能用网页「点击开始喊话」；`8654` 的明文 HTTP 保持不变，HA 侧边栏和 Scrypted 都不受影响。浏览器若拦截自动播放，会先静音播放，点击「开启声音」即可恢复。
 如果 RTSP 密码包含 `@`、`:`、`/` 等字符，需要在 RTSP URL 里做 URL 编码。
 
 ### 3. 启动容器
@@ -176,9 +189,11 @@ docker run -d \
   --name hikbridge \
   --restart unless-stopped \
   -p 8654:8654 \
+  -p 8555:8555/tcp \
+  -p 8555:8555/udp \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.13
+  ghcr.io/wangling75/amd64-hikbridge:0.2.14
 ```
 
 查看日志：
@@ -337,19 +352,17 @@ POST /speak_raw?rate=8000    body = raw PCM16, encoded for the camera
 | 预置位（preset） | ❌ 返回 err 11 |
 | 变焦 / 对焦 / 光圈 | ❌ 返回 err 11（无光学变焦） |
 | SDK 快照 | ✅ 1280×720 JPEG |
-| 喇叭播放（TTS） | ✅ 接口调用成功，实际出声待确认 |
+| 喇叭播放（TTS） | ✅ 已实机确认可出声 |
 | 摄像头麦克风回传 | ✅ 对讲链路建立后持续收到音频帧 |
-| RTSP 反向通道 | ❌ 没有 backchannel，所以 go2rtc / 原生 RTSP 对讲走不通 |
+| RTSP 反向通道 | ❌ 没有 backchannel；喊话走 SDK 私有协议 |
 
 ## 关于「语音对讲」
 
 - **HA 本身**没有对讲（双向语音）能力，HA 的 HomeKit Bridge 也只做单向音频。
 - 这套方案实现的是 **HA → 摄像头喇叭**（TTS、提示音），以及
   **摄像头麦克风 → 插件**（音频帧已经收得到，但 HA 侧没有现成的双向通道）。
-- 要做真正的 **双向对讲**（手机说话 → 摄像头喇叭），可行路线是：
-  插件把收到的麦克风音频转成 RTSP/WebRTC 流，再由 **Scrypted** 暴露成
-  HomeKit 摄像头——Scrypted 的 HomeKit 插件支持双向语音。
-  这一步需要额外写音频转发，属于后续工作。
+- Web UI 已通过 WebSocket 实现手机/电脑麦克风 → 摄像头喇叭的双向对讲；WebRTC 只负责播放摄像头画面和麦克风音轨。
+- HomeKit 双向对讲仍由可选的 `scrypted-hikbridge` 插件完成：Scrypted 提供 HomeKit 摄像头与语音通道，再把音频转发给 Hikbridge 的 `/talk` 接口。Web 页面本身不依赖 Scrypted。
 
 ## 已知限制
 

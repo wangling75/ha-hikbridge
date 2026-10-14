@@ -18,9 +18,20 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
     AAC/G.711 automatically (the tested 207 camera uses AAC/16 kHz)
 * Live two-way talk over a WebSocket (`/talk`) - the built-in web UI streams
   the browser microphone, or an audio file, straight to the camera speaker
-* Built-in web UI at `http://<ha-host>:8654/` with camera tabs, live
-  RTSP video/audio (`/live.mp4`, playable with the sound button),
+* Built-in web UI at `http://<ha-host>:8654/` with camera tabs,
   snapshot fallback/download, PTZ pad and click-to-toggle talk
+* Standalone WebRTC playback through the bundled go2rtc gateway, with an
+  automatic fragmented-MP4 fallback (`/live.mp4`) when WebRTC is unavailable
+
+WebRTC does not require Scrypted. The add-on starts go2rtc on media port
+`8555/tcp+udp`, keeps the go2rtc API on `127.0.0.1:1984`, and proxies only
+the authenticated SDP exchange through Hikbridge. Browsers cannot play an
+`rtsp://` URL directly; Home Assistant's RTSP cards also relay the stream
+server-side. Cameras without an audio track (for example the 225) show
+"no audio track" and do not enable talk.
+
+The bundled `go2rtc` binary is upstream `v1.9.14` from
+[AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc) (MIT license).
 
 The browser live stream is fragmented every 200 ms instead of once per
 camera keyframe. The UI keeps only a few seconds of MSE buffer and
@@ -45,7 +56,7 @@ so the same UI can be opened from the HA sidebar. The direct address
 
 The same image can run outside Home Assistant OS without Supervisor. Use
 `docker run` or `docker compose`, mount `/data/options.json`, expose port
-`8654`, and install the custom integration separately. See the repository
+`8654` plus `8555/tcp` and `8555/udp`, and install the custom integration separately. See the repository
 root `README.md` section `纯 Docker 部署` for the complete Chinese guide,
 `options.example.json`, and `docker-compose.example.yml`.
 
@@ -81,6 +92,10 @@ ssl: false
 ssl_port: 8655
 certfile: ""
 keyfile: ""
+webrtc: true
+webrtc_port: 8555
+webrtc_api_port: 1984
+webrtc_candidates: []
 ```
 
 | Option | Meaning |
@@ -91,6 +106,10 @@ keyfile: ""
 | `ssl` | Serve the UI over HTTPS with a self-signed certificate so the browser microphone works |
 | `ssl_port` | Port for the HTTPS listener, default `8655`; plain HTTP stays on `8654` |
 | `certfile` / `keyfile` | Optional certificate pair; generated under `/data/ssl` when empty |
+| `webrtc` | Enable the bundled WebRTC playback path, default `true` |
+| `webrtc_port` | go2rtc media port for TCP and UDP, default `8555` |
+| `webrtc_api_port` | Loopback-only go2rtc API port, default `1984` |
+| `webrtc_candidates` | Extra advertised WebRTC addresses; required as `host-ip:8555` for bridged Docker port mapping |
 
 Browsers only expose `navigator.mediaDevices` on secure origins, so the web
 UI press-to-talk button cannot record over plain HTTP. Turn `ssl` on and open
@@ -110,6 +129,7 @@ GET  /health                              {"ok": true, "cameras": [...]}
 GET  /api/cameras                         camera list
 GET  /api/cameras/<id>/snapshot.jpg       image/jpeg (?download=1 saves it)
 GET  /api/cameras/<id>/live.mp4           fragmented MP4: RTSP video + AAC audio
+POST /api/cameras/<id>/webrtc             {"sdp": "..."} -> WebRTC SDP answer
 POST /api/cameras/<id>/ptz                {"direction": "right", "duration": 0.6}
 POST /api/cameras/<id>/ptz/start          {"direction": "right"}
 POST /api/cameras/<id>/ptz/stop

@@ -5,6 +5,11 @@ RUN python3 -m pip install --no-cache-dir --index-url "${PYPI_MIRROR}" imageio-f
     && cp "$(python3 -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" /usr/local/bin/ffmpeg \
     && chmod +x /usr/local/bin/ffmpeg
 
+FROM alpine:3.20 AS go2rtc
+ARG GO2RTC_VERSION=v1.9.14
+ADD https://github.com/AlexxIT/go2rtc/releases/download/${GO2RTC_VERSION}/go2rtc_linux_amd64 /go2rtc
+RUN chmod 0755 /go2rtc && /go2rtc -version
+
 FROM ${BUILD_FROM}
 
 ARG APT_MIRROR=deb.debian.org
@@ -28,6 +33,7 @@ RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=go2rtc /go2rtc /usr/local/bin/go2rtc
 COPY hikbridge /opt/hikbridge/hikbridge
 COPY hcnetsdk /opt/hikbridge/hcnetsdk
 COPY run.sh /run.sh

@@ -42,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
+from .go2rtc import Go2RTCError, Go2RTCManager
 from .audio import prepare_wav
 from .sdk import PTZ_COMMANDS, HikCamera, HikError
 from .websocket import OP_BINARY, OP_TEXT, WebSocket, WebSocketError
@@ -84,6 +85,7 @@ class CameraEntry:
     rtsp_url: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     talking: bool = False
+    live_clients: int = 0
 
     def info(self) -> dict:
         return {
@@ -94,12 +96,14 @@ class CameraEntry:
             "audio_codec": self.camera.audio_codec,
             "audio_rate": self.camera.audio_rate,
             "live": bool(self.rtsp_url),
+            "webrtc": bool(self.rtsp_url),
         }
 
 
 class _State:
     def __init__(self, cameras: list[CameraEntry], token: str | None = None,
-                 https_port: int | None = None) -> None:
+                 https_port: int | None = None,
+                 webrtc: Go2RTCManager | None = None) -> None:
         if not cameras:
             raise ValueError("at least one camera is required")
         self.cameras = list(cameras)
@@ -108,6 +112,7 @@ class _State:
         # Advertised through /health so the web UI can point the user at the
         # HTTPS origin when the microphone is blocked on plain HTTP.
         self.https_port = https_port
+        self.webrtc = webrtc
 
     @property
     def default(self) -> CameraEntry:
@@ -208,6 +213,12 @@ def _handler(state: _State):
                         "timezone": os.environ.get("TZ") or time.tzname[0],
                         "timezone_status": hikbridge.timezone_status,
                         "https_port": state.https_port,
+                        "webrtc": bool(state.webrtc and state.webrtc.available),
+                        "webrtc_port": (
+                            state.webrtc.media_port
+                            if state.webrtc and state.webrtc.available else None
+                        ),
+                        "webrtc_error": (state.webrtc.error if state.webrtc else None),
                         "serial": default.camera.serial,
                         "device": default.camera.device,
                         "cameras": state.info_list(),
@@ -296,6 +307,8 @@ def _handler(state: _State):
                     with entry.lock:
                         sent = entry.camera.speak(pcm, rate)
                     self._json(200, {"ok": True, "camera": entry.id, "bytes": sent})
+                elif action == "webrtc":
+                    self._webrtc(entry, body)
                 else:
                     self._json(404, {"ok": False, "error": "not found"})
             except HikError as exc:
@@ -344,6 +357,29 @@ def _handler(state: _State):
                 )
             self._send(200, data, "image/jpeg", extra)
 
+        def _webrtc(self, entry: CameraEntry, body: bytes) -> None:
+            """Exchange a browser SDP offer through the local go2rtc API."""
+            if not state.webrtc or not state.webrtc.available:
+                reason = state.webrtc.error if state.webrtc else "WebRTC is disabled"
+                self._json(503, {"ok": False, "error": reason})
+                return
+            try:
+                payload = json.loads(body or b"{}")
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": f"invalid JSON: {exc}"})
+                return
+            offer = str(payload.get("sdp") or "")
+            if not offer:
+                self._json(400, {"ok": False, "error": "missing sdp"})
+                return
+            try:
+                answer = state.webrtc.exchange(entry, offer)
+            except Go2RTCError as exc:
+                _LOGGER.warning("WebRTC exchange failed for %s: %s", entry.id, exc)
+                self._json(502, {"ok": False, "error": str(exc)})
+                return
+            self._json(200, {"ok": True, "type": "answer", "sdp": answer})
+
         def _live(self, entry: CameraEntry) -> None:
             """Stream RTSP to the browser as fragmented MP4.
 
@@ -358,6 +394,18 @@ def _handler(state: _State):
             if not shutil.which("ffmpeg"):
                 self._json(501, {"ok": False, "error": "ffmpeg is not installed"})
                 return
+
+            # A small HA VM cannot afford one full RTSP/ffmpeg session per
+            # browser tab. Sharing one stream per camera keeps CPU bounded and
+            # prevents the rest of Home Assistant from becoming unresponsive.
+            with entry.lock:
+                if entry.live_clients >= 1:
+                    self._json(409, {
+                        "ok": False,
+                        "error": "another live view is already using this camera",
+                    })
+                    return
+                entry.live_clients += 1
 
             # Some Hikvision cameras send absolute RTP timestamps for audio.
             # Reset both streams to zero so fragmented MP4 stays in range and
@@ -374,24 +422,29 @@ def _handler(state: _State):
                 "-analyzeduration", "500000", "-probesize", "500000",
                 "-rtsp_transport", "tcp", "-i", entry.rtsp_url,
                 "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-pix_fmt", "yuv420p", "-s", "1280x720",
-                "-r", "22", "-g", "22", "-keyint_min", "22",
-                "-sc_threshold", "0",
-                "-b:v", "1800k", "-maxrate", "2200k", "-bufsize", "3600k",
-                "-c:a", "aac", "-b:a", "96k",
+                # Copy the camera's H.264 instead of re-encoding it. The old
+                # libx264 pass was the main CPU spike and the reason a second
+                # live view could make HA look disconnected.
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "64k",
                 "-ar", "48000", "-ac", "1",
                 "-af",
                 "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0:min_hard_comp=0.1",
-                "-vsync", "cfr", "-avoid_negative_ts", "make_zero",
+                "-avoid_negative_ts", "make_zero",
                 "-movflags", "empty_moov+default_base_moof",
-                "-frag_duration", "200000",
+                "-frag_duration", "100000",
                 "-flush_packets", "1", "-f", "mp4", "pipe:1",
             ]
-            proc = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                bufsize=0,
-            )
+            try:
+                proc = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    bufsize=0,
+                )
+            except OSError as exc:
+                with entry.lock:
+                    entry.live_clients = max(0, entry.live_clients - 1)
+                self._json(500, {"ok": False, "error": f"cannot start ffmpeg: {exc}"})
+                return
             if proc.stderr is not None:
                 def _drain_stderr() -> None:
                     for line in iter(proc.stderr.readline, b""):
@@ -428,6 +481,8 @@ def _handler(state: _State):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
             finally:
+                with entry.lock:
+                    entry.live_clients = max(0, entry.live_clients - 1)
                 try:
                     proc.terminate()
                     proc.wait(timeout=3)
@@ -522,7 +577,8 @@ def _handler(state: _State):
 
 def serve(cameras: list[CameraEntry], host: str = "0.0.0.0", port: int = 8654,
           token: str | None = None, ssl_context=None,
-          ssl_port: int | None = None) -> None:
+          ssl_port: int | None = None,
+          webrtc: Go2RTCManager | None = None) -> None:
     for entry in cameras:
         try:
             entry.camera.login()
@@ -532,6 +588,9 @@ def serve(cameras: list[CameraEntry], host: str = "0.0.0.0", port: int = 8654,
             # request path retries the login before it uses the camera.
             _LOGGER.error("camera %s is not reachable yet: %s", entry.id, exc)
 
+    if webrtc is not None:
+        webrtc.start()
+
     https_port: int | None = None
     if ssl_context is not None:
         try:
@@ -539,7 +598,7 @@ def serve(cameras: list[CameraEntry], host: str = "0.0.0.0", port: int = 8654,
         except (TypeError, ValueError):
             https_port = port + 1
 
-    state = _State(cameras, token, https_port)
+    state = _State(cameras, token, https_port, webrtc)
     httpd = ThreadingHTTPServer((host, port), _handler(state))
     httpd.daemon_threads = True
     _LOGGER.info("hikbridge listening on http://%s:%s with %d camera(s)",
@@ -563,6 +622,8 @@ def serve(cameras: list[CameraEntry], host: str = "0.0.0.0", port: int = 8654,
         httpd.serve_forever()
     finally:
         httpd.server_close()
+        if webrtc is not None:
+            webrtc.stop()
         for entry in cameras:
             try:
                 entry.camera.close()

@@ -1,5 +1,5 @@
 name: "Hikvision PTZ Bridge"
-version: "0.2.13"
+version: "0.2.14"
 slug: "hikbridge"
 description: "PTZ control, snapshots, live two-way talk and speaker playback for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
 url: "https://github.com/wangling75/ha-hikbridge"
@@ -27,6 +27,12 @@ options:
   ssl_port: 8655
   certfile: ""
   keyfile: ""
+  # Optional built-in WebRTC playback. No Scrypted or external gateway is
+  # required; the add-on bundles go2rtc and proxies its SDP exchange.
+  webrtc: true
+  webrtc_port: 8555
+  webrtc_api_port: 1984
+  webrtc_candidates: []
 schema:
   cameras:
     - id: str?
@@ -43,3 +49,7 @@ schema:
   ssl_port: port?
   certfile: str?
   keyfile: str?
+  webrtc: bool?
+  webrtc_port: port?
+  webrtc_api_port: port?
+  webrtc_candidates: [str]?

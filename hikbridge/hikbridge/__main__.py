@@ -32,6 +32,7 @@ import urllib.request
 import hikbridge  # absolute self-import: publishes the timezone status
 
 from .server import CameraEntry, serve
+from .go2rtc import Go2RTCManager
 from .sdk import HikCamera
 
 _LOGGER = logging.getLogger("hikbridge")
@@ -193,6 +194,28 @@ def main(argv: list[str] | None = None) -> int:
 
     token = _clean(options.get("auth_token")) or args.token
 
+    # WebRTC is an optional, self-contained playback path.  The binary is
+    # bundled in the add-on image, but a missing or unusable gateway must
+    # never prevent the existing PTZ, snapshot and MSE features from loading.
+    webrtc = None
+    if bool(_clean(options.get("webrtc"), True)):
+        try:
+            webrtc_api_port = int(_clean(options.get("webrtc_api_port"), 1984))
+            webrtc_media_port = int(_clean(options.get("webrtc_port"), 8555))
+            raw_candidates = options.get("webrtc_candidates")
+            webrtc_candidates = (
+                [str(value) for value in raw_candidates if str(value).strip()]
+                if isinstance(raw_candidates, list) else []
+            )
+            webrtc = Go2RTCManager(
+                cameras,
+                api_port=webrtc_api_port,
+                media_port=webrtc_media_port,
+                candidates=webrtc_candidates,
+            )
+        except (TypeError, ValueError) as exc:
+            _LOGGER.error("invalid WebRTC port configuration: %s", exc)
+
     # Browsers only allow microphone capture on secure origins, so HTTPS is
     # what makes the web UI press-to-talk button work.
     ssl_context = None
@@ -224,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         serve(cameras, args.listen, args.listen_port, token, ssl_context,
-              ssl_port)
+              ssl_port, webrtc)
     except SystemExit:
         for entry in cameras:
             try:
