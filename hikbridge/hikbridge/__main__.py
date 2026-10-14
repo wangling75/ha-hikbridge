@@ -193,6 +193,11 @@ def _build_webrtc(cameras: list[CameraEntry], options: dict) -> Go2RTCManager | 
     if not bool(_clean(options.get("webrtc"), True)):
         return None
 
+    # Old installs may still carry public STUN servers. go2rtc works fine
+    # without them on the LAN, and HA ingress remote playback uses HLS.
+    if options.get("webrtc_ice_servers"):
+        _LOGGER.info("webrtc_ice_servers is deprecated and ignored")
+
     try:
         # HA's own go2rtc owns 11984 on the loopback interface, so the
         # bundled gateway stays one port above it.
@@ -207,11 +212,6 @@ def _build_webrtc(cameras: list[CameraEntry], options: dict) -> Go2RTCManager | 
     webrtc_candidates = (
         [str(value) for value in raw_candidates if str(value).strip()]
         if isinstance(raw_candidates, list) else []
-    )
-    raw_ice_servers = options.get("webrtc_ice_servers")
-    webrtc_ice_servers = (
-        [str(value) for value in raw_ice_servers if str(value).strip()]
-        if isinstance(raw_ice_servers, list) else None
     )
 
     backend = str(_clean(options.get("webrtc_backend"), "auto")).strip().lower()
@@ -231,7 +231,6 @@ def _build_webrtc(cameras: list[CameraEntry], options: dict) -> Go2RTCManager | 
                 api_port=api_port,
                 media_port=media_port,
                 candidates=webrtc_candidates,
-                ice_servers=webrtc_ice_servers,
                 external_api=ha_api,
                 advertise_port=ha_port,
             )
@@ -247,7 +246,6 @@ def _build_webrtc(cameras: list[CameraEntry], options: dict) -> Go2RTCManager | 
         api_port=api_port,
         media_port=media_port,
         candidates=webrtc_candidates,
-        ice_servers=webrtc_ice_servers,
     )
 
 

@@ -44,10 +44,6 @@ _LOGGER = logging.getLogger("hikbridge.go2rtc")
 HA_GO2RTC_API = "http://127.0.0.1:11984"
 HA_GO2RTC_WEBRTC_PORT = 18555
 
-_DEFAULT_ICE_SERVERS = [
-    "stun:stun.cloudflare.com:3478",
-    "stun:stun.l.google.com:19302",
-]
 
 def _parse_ice_server(value: str) -> dict | None:
     """Convert a compact option into go2rtc's ICE server shape."""
@@ -137,10 +133,8 @@ class Go2RTCManager:
         # Cameras with an audio codec get a second, Opus-only source so
         # browsers can hear them inside WebRTC.  If that source turns out
         # to be unusable the exchange retries video-only.
-        self._audio_sources = True
-        selected_ice_servers = (
-            _DEFAULT_ICE_SERVERS if ice_servers is None else ice_servers
-        )
+        self._audio_disabled: set[str] = set()
+        selected_ice_servers = ice_servers or []
         self.ice_servers = [
             str(value).strip() for value in selected_ice_servers if str(value).strip()
         ]
@@ -360,7 +354,7 @@ class Go2RTCManager:
             query = [("name", name)]
             query += [
                 ("src", source)
-                for source in self._sources(name, with_audio=self._audio_sources)
+                for source in self._sources(name, with_audio=name not in self._audio_disabled)
             ]
             path = "/api/streams?" + urllib.parse.urlencode(query)
             try:
@@ -394,7 +388,15 @@ class Go2RTCManager:
         if "#" not in url and not self.external_api:
             url += "#transport=tcp"
         sources = [url]
-        if with_audio and getattr(entry.camera, "audio_codec", None):
+        # The SDK's audio_codec describes the private-protocol intercom
+        # codec, not the RTSP live stream. Some cameras expose live audio
+        # over RTSP even when NET_DVR_GetCurrentAudioCompress fails, so do
+        # not use the intercom codec as a gate for live WebRTC audio.
+        # go2rtc negotiates across sources and will ignore this one when the
+        # RTSP stream has no audio track.
+        if with_audio and name not in self._audio_disabled:
+            # Keep failures per camera: a video-only model must not disable
+            # Opus playback for the other cameras on the same gateway.
             sources.append(f"ffmpeg:{name}#audio=opus")
         return sources
 
@@ -449,15 +451,23 @@ class Go2RTCManager:
             # The optional Opus source needs go2rtc's own RTSP relay.  When
             # that relay is unavailable the whole offer fails, so retry once
             # with the camera's plain RTSP source and stay video-only.
-            if not (self.external_api and self._audio_sources):
+            if name in self._audio_disabled:
                 raise
             _LOGGER.warning(
                 "WebRTC exchange for %s failed (%s); retrying without the "
                 "Opus audio source", entry.id, exc,
             )
-            self._audio_sources = False
-            if self._register_external_streams(force=True):
-                raise
+            self._audio_disabled.add(name)
+            if self.external_api:
+                if self._register_external_streams(force=True):
+                    raise
+            else:
+                # The bundled gateway keeps its stream list in the YAML it
+                # was started with, so restart it once with this camera's
+                # audio source removed.
+                self.stop()
+                if not self.start():
+                    raise Go2RTCError(self.error or "cannot restart WebRTC gateway")
             return self._post_offer(name, offer, request_host)
 
     def _post_offer(self, name: str, offer: str,

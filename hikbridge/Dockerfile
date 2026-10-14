@@ -1,14 +1,21 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
-FROM python:3.12-slim AS ffmpeg
-ARG PYPI_MIRROR=https://pypi.org/simple
-RUN python3 -m pip install --no-cache-dir --index-url "${PYPI_MIRROR}" imageio-ffmpeg==0.5.1 \
-    && cp "$(python3 -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" /usr/local/bin/ffmpeg \
-    && chmod +x /usr/local/bin/ffmpeg
-
 FROM alpine:3.20 AS go2rtc
 ARG GO2RTC_VERSION=v1.9.14
 ADD https://github.com/AlexxIT/go2rtc/releases/download/${GO2RTC_VERSION}/go2rtc_linux_amd64 /go2rtc
 RUN chmod 0755 /go2rtc && /go2rtc -version
+
+# A static FFmpeg keeps the image small and avoids Debian's libllvm/mesa
+# dependency tree. go2rtc rejects the old 4.2 imageio build, so this is
+# pinned to 7.0.2 and verified before it is copied into the final image.
+FROM alpine:3.20 AS ffmpeg
+ARG IMAGEIO_FFMPEG_VERSION=0.6.0
+ARG IMAGEIO_FFMPEG_SHA256=c7e46fcec401dd990405049d2e2f475e2b397779df2519b544b8aab515195282
+RUN apk add --no-cache curl unzip \
+    && curl -fsSL -o /ffmpeg.whl \
+        "https://files.pythonhosted.org/packages/a0/2d/43c8522a2038e9d0e7dbdf3a61195ecc31ca576fb1527a528c877e87d973/imageio_ffmpeg-${IMAGEIO_FFMPEG_VERSION}-py3-none-manylinux2014_x86_64.whl" \
+    && echo "${IMAGEIO_FFMPEG_SHA256}  /ffmpeg.whl" | sha256sum -c - \
+    && unzip -p /ffmpeg.whl imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2 > /ffmpeg \
+    && chmod 0755 /ffmpeg
 
 # hls.js lets Chrome/Firefox play the HLS stream the same way Home
 # Assistant's own camera cards do remotely. Safari plays HLS natively and
@@ -45,7 +52,7 @@ RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do \
     && apt-get install -y --no-install-recommends python3 libasound2 tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=go2rtc /go2rtc /usr/local/bin/go2rtc
 COPY hikbridge /opt/hikbridge/hikbridge
 COPY hcnetsdk /opt/hikbridge/hcnetsdk

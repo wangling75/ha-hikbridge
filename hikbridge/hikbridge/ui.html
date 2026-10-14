@@ -315,6 +315,9 @@
     webRtcAvailable = !!info.webrtc;
     hlsAvailable = !!info.hls;
     webRtcBackend = info.webrtc_backend || "";
+    // New HA-side default. Old browser sessions may still remember MSE,
+    // but only if the user selected that button explicitly.
+    if (!savedModeIsExplicit && INGRESS_MODE && hlsAvailable) streamMode = "hls";
     webRtcPort = info.webrtc_port || null;
     updatePlayerUi();
   }
@@ -437,6 +440,7 @@
   // or Docker page starts on WebRTC.
   var savedMode = localStorage.getItem("hikbridge.player");
   var streamMode = savedMode || (INGRESS_MODE ? "mse" : "webrtc");
+  var savedModeIsExplicit = !!savedMode;
   var webRtcAvailable = false;
   // "home_assistant" means the plugin reuses HA's own go2rtc, so WebRTC
   // media leaves through HA's port instead of one owned by the plugin.
@@ -486,7 +490,7 @@
 
   function liveMime() {
     var MS = window.MediaSource || window.ManagedMediaSource;
-    var hasAudio = !!(current && current.audio_codec);
+    var hasAudio = liveAudioExpected();
     var candidates = hasAudio ? [
       'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
       'video/mp4; codecs="avc1.4D401F,mp4a.40.2"',
@@ -505,6 +509,13 @@
       if (!MS.isTypeSupported || MS.isTypeSupported(candidates[i])) return candidates[i];
     }
     return "";
+  }
+
+  function liveAudioExpected() {
+    // The SDK intercom codec is unrelated to the RTSP audio track. Ask
+    // for audio whenever a live RTSP source exists; go2rtc will omit it
+    // cleanly if the camera really has no audio track.
+    return !!(current && current.live && current.rtsp_audio !== false);
   }
 
   function setLiveUi(on, hasAudio) {
@@ -678,9 +689,9 @@
   function handleWebRTCFailure(err) {
     if (!liveState.webRtcFallback) {
       liveState.webRtcFallback = true;
-      streamMode = "mse";
+      streamMode = (hlsAvailable && hlsSupported()) ? "hls" : "mse";
       updatePlayerUi();
-      log("WebRTC 不可用，切换到兼容模式：" + (err && err.message ? err.message : err), "e");
+      log((streamMode === "hls" ? "WebRTC 不可用，切换到 HLS：" : "WebRTC 不可用，切换到兼容模式：") + (err && err.message ? err.message : err), "e");
       stopLive(false);
       setTimeout(startLive, 250);
       return;
@@ -712,7 +723,7 @@
     liveState.mode = "webrtc";
     liveState.pc = pc;
     liveState.remoteStream = remote;
-    liveState.hasAudio = !!current.audio_codec;
+    liveState.hasAudio = liveAudioExpected();
     liveState.active = true;
     live.srcObject = remote;
     live.style.display = "none";
@@ -811,7 +822,7 @@
     liveState.mode = "hls";
     liveState.hlsFallback = false;
     liveState.active = true;
-    liveState.hasAudio = !!current.audio_codec;
+    liveState.hasAudio = liveAudioExpected();
     live.style.display = "none";
     snap.style.display = "";
     snapMsg.textContent = "正在连接实时画面…";
@@ -822,16 +833,36 @@
     var url = withToken(BASE + camPath(current.id, "/hls/index.m3u8"));
     var Ctor = window.Hls;
     if (Ctor && Ctor.isSupported && Ctor.isSupported()) {
+      liveState.hlsRecoveries = 0;
       var player = new Ctor({
         lowLatencyMode: true,
+        backBufferLength: 0,
+        liveDurationInfinity: true,
         liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 4,
+        maxLiveSyncPlaybackRate: 1.5,
         maxBufferLength: 6,
-        manifestLoadingTimeOut: 8000
+        manifestLoadingTimeOut: 8000,
+        manifestLoadingMaxRetry: 3,
+        levelLoadingMaxRetry: 4,
+        fragLoadingMaxRetry: 6
       });
       liveState.hlsPlayer = player;
       player.on(Ctor.Events.ERROR, function (evt, data) {
         if (!liveState.active || liveState.mode !== "hls") return;
-        if (data && data.fatal) handleHlsFailure("HLS 播放失败");
+        if (!data || !data.fatal) return;
+        // go2rtc's live HLS has 0.5s segments. A single missing segment or
+        // decoder hiccup should not force the UI into the old MSE mode.
+        if (liveState.hlsRecoveries < 4 && data.type === Ctor.ErrorTypes.NETWORK_ERROR) {
+          liveState.hlsRecoveries++;
+          try { player.startLoad(); return; } catch (e) {}
+        }
+        if (liveState.hlsRecoveries < 4 && data.type === Ctor.ErrorTypes.MEDIA_ERROR) {
+          liveState.hlsRecoveries++;
+          try { player.recoverMediaError(); return; } catch (e) {}
+          try { player.swapAudioCodec(); player.recoverMediaError(); return; } catch (e) {}
+        }
+        handleHlsFailure("HLS 播放失败");
       });
       player.attachMedia(live);
       player.loadSource(url);
@@ -860,7 +891,7 @@
     liveState.mode = "mse";
     liveState.source = source;
     liveState.objectUrl = URL.createObjectURL(source);
-    liveState.hasAudio = !!current.audio_codec;
+    liveState.hasAudio = liveAudioExpected();
     liveState.transport = "ws";
     if (INGRESS_MODE) liveState.transport = "http";
     liveState.wsFallback = false;
@@ -1010,6 +1041,7 @@
     var b = ev.target.closest("button[data-player]");
     if (!b || b.disabled) return;
     streamMode = b.dataset.player;
+    savedModeIsExplicit = true;
     liveState.webRtcFallback = false;
     liveState.hlsFallback = false;
     localStorage.setItem("hikbridge.player", streamMode);
@@ -1039,6 +1071,10 @@
     snap.style.display = "none";
     snapMsg.classList.add("hide");
     frame.classList.add("live-on");
+    if (liveState.mode === "webrtc" && liveState.remoteStream) {
+      liveState.hasAudio = liveState.remoteStream.getAudioTracks().length > 0;
+      setLiveUi(true, liveState.hasAudio);
+    }
     touchLive();
     setStatus(true, liveState.mode === "webrtc" ? "WebRTC 实时画面"
       : (liveState.mode === "hls" ? "HLS 实时画面" : "实时画面"));

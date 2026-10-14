@@ -35,10 +35,10 @@ so Supervisor bridge addresses such as `172.30.32.1` are not advertised to a
 LAN browser. Its internal RTSP relay uses a random loopback port, so HA's own
 `8554` listener is untouched.
 Camera audio is transcoded to Opus for browser WebRTC. Remote HA sidebars use
-the same-origin HTTP/MSE fallback when direct WebRTC media cannot connect;
-this avoids HA ingress WebSocket proxy failures.
-For direct remote WebRTC, forward UDP/TCP 18554 or configure a TURN server in
-`webrtc_ice_servers`.
+the same-origin HLS fallback when direct WebRTC media cannot connect; this
+avoids HA ingress WebSocket proxy failures and long-response buffering.
+For direct remote WebRTC, forward UDP/TCP 18554. When it is unreachable, the
+web UI falls back to HLS instead of requiring a TURN server.
 Browsers cannot play an
 `rtsp://` URL directly; Home Assistant's RTSP cards also relay the stream
 server-side. Cameras without an audio track (for example the 225) show
@@ -110,9 +110,6 @@ webrtc: true
 webrtc_port: 18554
 webrtc_api_port: 11984
 webrtc_candidates: []
-webrtc_ice_servers:
-  - "stun:stun.cloudflare.com:3478"
-  - "stun:stun.l.google.com:19302"
 ```
 
 | Option | Meaning |
@@ -127,7 +124,7 @@ webrtc_ice_servers:
 | `webrtc_port` | go2rtc media port for TCP and UDP, default `18554` |
 | `webrtc_api_port` | Loopback-only go2rtc API port, default `11984` |
 | `webrtc_candidates` | Extra advertised WebRTC addresses; required as `host-ip:18554` for bridged Docker port mapping. Leave empty for the HA add-on so the LAN address is auto-detected |
-| `webrtc_ice_servers` | STUN/TURN servers. Supports `stun:host:port`, `turn:user:pass@host:port`, or a JSON ICE server object string |
+| `webrtc_ice_servers` | Deprecated and ignored at runtime; kept only so old options files still validate |
 
 Browsers only expose `navigator.mediaDevices` on secure origins, so the web
 UI press-to-talk button cannot record over plain HTTP. Turn `ssl` on and open

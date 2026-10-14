@@ -1,7 +1,7 @@
 {
   "domain": "hikbridge",
   "name": "Hikvision PTZ Bridge",
-  "version": "0.2.22",
+  "version": "0.2.23",
   "config_flow": true,
   "documentation": "https://github.com/wangling75/ha-hikbridge",
   "issue_tracker": "https://github.com/wangling75/ha-hikbridge/issues",

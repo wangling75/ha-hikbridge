@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.22
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.23
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.22
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.22 ./hikbridge
+docker build -t hikbridge:0.2.23 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -168,11 +168,7 @@ cp options.example.json options.json
   "ha_webrtc_port": 18555,
   "webrtc_port": 18554,
   "webrtc_api_port": 11985,
-  "webrtc_candidates": [],
-  "webrtc_ice_servers": [
-    "stun:stun.cloudflare.com:3478",
-    "stun:stun.l.google.com:19302"
-  ]
+  "webrtc_candidates": []
 }
 ```
 
@@ -184,17 +180,17 @@ cp options.example.json options.json
 * `home_assistant`：强制复用 HA 的 go2rtc。插件只把每台摄像头注册成 `hikbridge-<id>` 流，SDP 交换走回环 API，媒体走 HA 自己的 `18555/tcp`。媒体流是运行时的，HA 重启 go2rtc 后插件会自动重新注册。
 * `bundled`：强制启动插件镜像里的 go2rtc，媒体端口 `18554/tcp+udp`，适合纯 Docker 自己映射端口。
 
-复用 HA 内置 go2rtc 后，插件对外只需要 HA 的 `8123`：兼容模式（MSE）走 `/api/hassio_ingress/...` 同源 HTTP，不依赖任何插件端口。HA add-on 在 host 网络下会按摄像头路由自动选择实际局域网出口地址作为 ICE 地址，避免把 `172.30.32.1` 这类 Supervisor 地址发给局域网浏览器。摄像头音轨会自动转成浏览器 WebRTC 支持的 Opus；如果该音频源在目标 go2rtc 上不可用（relay 不可达），插件会自动降级成视频-only 再重试一次，不会把整路画面弄挂。
+复用 HA 内置 go2rtc 后，插件对外只需要 HA 的 `8123`：HLS 走 `/api/hassio_ingress/...` 同源 HTTP，不依赖任何插件端口。HA add-on 在 host 网络下会按摄像头路由自动选择实际局域网出口地址作为 ICE 地址，避免把 `172.30.32.1` 这类 Supervisor 地址发给局域网浏览器。摄像头音轨会自动转成浏览器 WebRTC 支持的 Opus；直播音频不再依赖 SDK 对讲编码返回值，避免“RTSP 有声音但页面显示无音轨”。如果该音频源在目标 go2rtc 上不可用（relay 不可达），插件会自动降级成视频-only 再重试一次，不会把整路画面弄挂。
 
 内置 go2rtc 是上游 [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc) 的 `v1.9.14`（MIT 许可）。
 
-远程通过 HA 域名打开侧边栏时，默认走 **HLS**，只靠 HA 的 `8123` 就能看，而且这正是 HA 自带摄像头卡片远程能播的原因：浏览器不再维持一条长时间不结束的 HTTP 流（旧版 `/live.mp4` 兼容模式），而是先取一小段 playlist、再一段段拉短分片。公网域名、反向代理和 Cloudflare 这类中间层会缓冲“一个永不结束的响应”，所以旧版 MSE 兼容模式远程经常冻屏；HLS 每个请求都很快返回，不受这个影响。Chrome/Firefox 由镜像内置的 hls.js 播放，Safari/iOS 原生播放。侧边栏里手动点「WebRTC」会先尝试直连，6 秒内没建立媒体连接就自动回到 HLS。
+远程通过 HA 域名打开侧边栏时，默认走 **HLS**，只靠 HA 的 `8123` 就能看，而且这正是 HA 自带摄像头卡片远程能播的原因：浏览器不再维持一条长时间不结束的 HTTP 流（旧版 `/live.mp4` 兼容模式），而是先取一小段 playlist、再一段段拉短分片。公网域名、反向代理和 Cloudflare 这类中间层会缓冲“一个永不结束的响应”，所以旧版 MSE 兼容模式远程经常冻屏；HLS 每个请求都很快返回，不受这个影响。HLS 已改用 fMP4 并保留 AAC 音轨；Chrome/Firefox 由镜像内置的 hls.js 播放，Safari/iOS 原生播放。侧边栏里手动点「WebRTC」会先尝试直连，6 秒内没建立媒体连接就自动回到 HLS。
 
-远程如果要走真正的 WebRTC（更低延时），需要把 HA 内置 go2rtc 的 `18555/tcp` 转发到 HA 主机，或者在 `webrtc_ice_servers` 里配 TURN；两者都没有时，远程就用 HLS，本地局域网仍然优先 WebRTC。
+远程如果要走真正的 WebRTC（更低延时），需要把 HA 内置 go2rtc 的 `18555/tcp` 转发到 HA 主机；端口无法直连时自动使用 HLS。本地局域网优先 WebRTC。
 
 纯 Docker 使用 `-p` 端口映射时，把 Docker 主机的地址写进候选地址，例如 `"webrtc_candidates": ["192.168.2.153:18554"]`；动态公网 IP 可以写成 `"stun:18554"`，由 STUN 自动发现公网地址。
 
-`webrtc_ice_servers` 支持 STUN 和 TURN。TURN 可以写成 `turn:user:pass@turn.example.com:3478?transport=udp`，也可以直接写 JSON 对象字符串。HA add-on 默认带两个公共 STUN；公共 STUN 只帮助发现公网地址，不转发媒体，端口无法直连时仍需要 TURN 或使用 WebSocket 兼容模式。
+`webrtc_ice_servers` 仅保留给旧配置兼容；0.2.23 起运行时忽略它，不再默认依赖公共 STUN。直连不出来的远程访问自动使用 HLS。
 
 浏览器不能直接播放 `rtsp://`。HA 里的 RTSP 卡片能播放，是因为 HA/go2rtc 在服务端取流后再转给浏览器；Hikbridge 现在也内置了同样的转换，所以不需要 Scrypted。没有音轨的摄像头（例如 225）会显示「无音轨」，不会误开对讲。
 
@@ -212,7 +208,7 @@ docker run -d \
   -p 18554:18554/udp \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.22
+  ghcr.io/wangling75/amd64-hikbridge:0.2.23
 ```
 
 查看日志：

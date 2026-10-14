@@ -535,7 +535,10 @@ def _handler(state: _State):
             try:
                 if file_name in ("index.m3u8", "master.m3u8"):
                     status, _ctype, body = state.webrtc.proxy(
-                        "/api/stream.m3u8?" + urlencode({"src": name})
+                        # Without mp4, go2rtc uses legacy MPEG-TS HLS and
+                        # intentionally drops audio. fMP4 keeps AAC in the
+                        # playlist, matching HA's own camera cards.
+                        "/api/stream.m3u8?" + urlencode({"src": name, "mp4": "1"})
                     )
                     if status != 200:
                         self._json(502, {

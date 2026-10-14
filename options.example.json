@@ -28,9 +28,5 @@
   "ha_webrtc_port": 18555,
   "webrtc_port": 18554,
   "webrtc_api_port": 11985,
-  "webrtc_candidates": [],
-  "webrtc_ice_servers": [
-    "stun:stun.cloudflare.com:3478",
-    "stun:stun.l.google.com:19302"
-  ]
+  "webrtc_candidates": []
 }
