@@ -124,6 +124,19 @@ class Go2RTCManager:
                 break
             try:
                 self._request("GET", "/api")
+                if self._proc.poll() is not None:
+                    self.error = (
+                        f"go2rtc exited with code {self._proc.returncode}; "
+                        "check whether the WebRTC port is already in use"
+                    )
+                    break
+                streams = json.loads(self._request("GET", "/api/streams"))
+                if not isinstance(streams, dict) or not set(self._names).issubset(streams):
+                    self.error = (
+                        "go2rtc API belongs to another instance or did not load "
+                        "the Hikbridge camera streams"
+                    )
+                    break
                 self.available = True
                 self.error = None
                 _LOGGER.info(
@@ -131,7 +144,8 @@ class Go2RTCManager:
                     self.media_port, self.api_port,
                 )
                 return True
-            except Go2RTCError:
+            except (Go2RTCError, ValueError) as exc:
+                self.error = f"go2rtc readiness failed: {exc}"
                 time.sleep(0.15)
 
         if not self.error:
@@ -185,6 +199,11 @@ class Go2RTCManager:
         lines = [
             "api:",
             f'  listen: "127.0.0.1:{self.api_port}"',
+            # go2rtc otherwise starts its RTSP relay on :8554, which is the
+            # default HA go2rtc port. Hikbridge never consumes this relay;
+            # port 0 asks the OS for an unused loopback port instead.
+            "rtsp:",
+            '  listen: "127.0.0.1:0"',
             "webrtc:",
             f'  listen: ":{self.media_port}"',
             "  ice_servers: []",

@@ -112,7 +112,7 @@ add-on 用 Debian 基础镜像，SDK 在里面正常工作；它和 HA Core 都�
 直接用 GHCR 镜像：
 
 ```bash
-docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.16
+docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.17
 ```
 
 或者本地构建：
@@ -120,7 +120,7 @@ docker pull ghcr.io/wangling75/amd64-hikbridge:0.2.16
 ```bash
 git clone https://github.com/wangling75/ha-hikbridge.git
 cd ha-hikbridge
-docker build -t hikbridge:0.2.16 ./hikbridge
+docker build -t hikbridge:0.2.17 ./hikbridge
 ```
 
 镜像只提供 `linux/amd64`。在 ARM 主机上需要模拟运行，不推荐长期这样用。
@@ -171,7 +171,7 @@ cp options.example.json options.json
 
 `auth_token` 是 Web UI 和 API 的密码，不是摄像头密码。`speak_sample_rate` 是后备输入采样率；插件登录后会优先使用摄像头实际声明的编码和采样率。
 
-网页默认使用插件内置的 **go2rtc WebRTC**，不安装 Scrypted 也能直接看带声音的实时画面。WebRTC 媒体端口是 `18554/tcp+udp`，go2rtc 管理 API 只监听容器内的 `127.0.0.1:11984`，不会暴露到局域网。HA 自带的 go2rtc 通常占用 `1984/8555`，Hikbridge 使用独立端口，避免冲突；WebRTC 不可用时，页面会自动回退到 `/live.mp4` 兼容模式。
+网页默认使用插件内置的 **go2rtc WebRTC**，不安装 Scrypted 也能直接看带声音的实时画面。WebRTC 媒体端口是 `18554/tcp+udp`，go2rtc 管理 API 只监听容器内的 `127.0.0.1:11984`，不会暴露到局域网。HA 自带的 go2rtc 通常占用 `1984/8555/8554`；Hikbridge 使用独立端口，并把内部 RTSP relay 放到随机回环端口，因此不会抢占 HA 的 `8554`。WebRTC 不可用时，页面会自动回退到 `/live.mp4` 兼容模式。
 
 内置 go2rtc 是上游 [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc) 的 `v1.9.14`（MIT 许可）。
 
@@ -193,7 +193,7 @@ docker run -d \
   -p 18554:18554/udp \
   -e HIK_TIMEZONE=Asia/Shanghai \
   -v "$PWD/options.json:/data/options.json:ro" \
-  ghcr.io/wangling75/amd64-hikbridge:0.2.16
+  ghcr.io/wangling75/amd64-hikbridge:0.2.17
 ```
 
 查看日志：

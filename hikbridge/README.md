@@ -25,7 +25,9 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
 
 WebRTC does not require Scrypted. The add-on starts go2rtc on media port
 `18554/tcp+udp`, keeps the go2rtc API on `127.0.0.1:11984`, and proxies only
-the authenticated SDP exchange through Hikbridge. Browsers cannot play an
+the authenticated SDP exchange through Hikbridge. Its internal RTSP relay
+uses a random loopback port, so HA's own `8554` listener is untouched.
+Browsers cannot play an
 `rtsp://` URL directly; Home Assistant's RTSP cards also relay the stream
 server-side. Cameras without an audio track (for example the 225) show
 "no audio track" and do not enable talk.

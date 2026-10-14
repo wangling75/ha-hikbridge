@@ -1,5 +1,5 @@
 name: "Hikvision PTZ Bridge"
-version: "0.2.16"
+version: "0.2.17"
 slug: "hikbridge"
 description: "PTZ control, snapshots, live two-way talk and speaker playback for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
 url: "https://github.com/wangling75/ha-hikbridge"
@@ -31,6 +31,8 @@ options:
   # required; the add-on bundles go2rtc and proxies its SDP exchange.
   webrtc: true
   # Keep these separate from HA's own go2rtc (usually 1984/8555).
+  # The internal RTSP relay also uses an ephemeral loopback port, so it
+  # never takes HA's 8554.
   webrtc_port: 18554
   webrtc_api_port: 11984
   webrtc_candidates: []
