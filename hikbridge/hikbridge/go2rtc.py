@@ -36,7 +36,7 @@ class Go2RTCManager:
     """Start one go2rtc process and expose its WHEP-style SDP exchange."""
 
     def __init__(self, cameras, binary: str | None = None,
-                 api_port: int = 1984, media_port: int = 8555,
+                 api_port: int = 11984, media_port: int = 18554,
                  candidates: list[str] | None = None) -> None:
         self.cameras = [entry for entry in cameras if entry.rtsp_url]
         self.binary = (

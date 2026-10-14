@@ -200,8 +200,8 @@ def main(argv: list[str] | None = None) -> int:
     webrtc = None
     if bool(_clean(options.get("webrtc"), True)):
         try:
-            webrtc_api_port = int(_clean(options.get("webrtc_api_port"), 1984))
-            webrtc_media_port = int(_clean(options.get("webrtc_port"), 8555))
+            webrtc_api_port = int(_clean(options.get("webrtc_api_port"), 11984))
+            webrtc_media_port = int(_clean(options.get("webrtc_port"), 18554))
             raw_candidates = options.get("webrtc_candidates")
             webrtc_candidates = (
                 [str(value) for value in raw_candidates if str(value).strip()]

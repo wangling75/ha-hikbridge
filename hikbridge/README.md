@@ -24,7 +24,7 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
   automatic fragmented-MP4 fallback (`/live.mp4`) when WebRTC is unavailable
 
 WebRTC does not require Scrypted. The add-on starts go2rtc on media port
-`8555/tcp+udp`, keeps the go2rtc API on `127.0.0.1:1984`, and proxies only
+`18554/tcp+udp`, keeps the go2rtc API on `127.0.0.1:11984`, and proxies only
 the authenticated SDP exchange through Hikbridge. Browsers cannot play an
 `rtsp://` URL directly; Home Assistant's RTSP cards also relay the stream
 server-side. Cameras without an audio track (for example the 225) show
@@ -56,7 +56,7 @@ so the same UI can be opened from the HA sidebar. The direct address
 
 The same image can run outside Home Assistant OS without Supervisor. Use
 `docker run` or `docker compose`, mount `/data/options.json`, expose port
-`8654` plus `8555/tcp` and `8555/udp`, and install the custom integration separately. See the repository
+`8654` plus `18554/tcp` and `18554/udp`, and install the custom integration separately. See the repository
 root `README.md` section `纯 Docker 部署` for the complete Chinese guide,
 `options.example.json`, and `docker-compose.example.yml`.
 
@@ -93,8 +93,8 @@ ssl_port: 8655
 certfile: ""
 keyfile: ""
 webrtc: true
-webrtc_port: 8555
-webrtc_api_port: 1984
+webrtc_port: 18554
+webrtc_api_port: 11984
 webrtc_candidates: []
 ```
 
@@ -107,9 +107,9 @@ webrtc_candidates: []
 | `ssl_port` | Port for the HTTPS listener, default `8655`; plain HTTP stays on `8654` |
 | `certfile` / `keyfile` | Optional certificate pair; generated under `/data/ssl` when empty |
 | `webrtc` | Enable the bundled WebRTC playback path, default `true` |
-| `webrtc_port` | go2rtc media port for TCP and UDP, default `8555` |
-| `webrtc_api_port` | Loopback-only go2rtc API port, default `1984` |
-| `webrtc_candidates` | Extra advertised WebRTC addresses; required as `host-ip:8555` for bridged Docker port mapping |
+| `webrtc_port` | go2rtc media port for TCP and UDP, default `18554` |
+| `webrtc_api_port` | Loopback-only go2rtc API port, default `11984` |
+| `webrtc_candidates` | Extra advertised WebRTC addresses; required as `host-ip:18554` for bridged Docker port mapping |
 
 Browsers only expose `navigator.mediaDevices` on secure origins, so the web
 UI press-to-talk button cannot record over plain HTTP. Turn `ssl` on and open

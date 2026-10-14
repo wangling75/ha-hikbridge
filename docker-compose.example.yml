@@ -1,12 +1,12 @@
 services:
   hikbridge:
-    image: ghcr.io/wangling75/amd64-hikbridge:0.2.15
+    image: ghcr.io/wangling75/amd64-hikbridge:0.2.16
     container_name: hikbridge
     restart: unless-stopped
     ports:
       - "8654:8654"
-      - "8555:8555/tcp"
-      - "8555:8555/udp"
+      - "18554:18554/tcp"
+      - "18554:18554/udp"
     environment:
       HIK_TIMEZONE: Asia/Shanghai
     volumes:
