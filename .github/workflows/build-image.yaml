@@ -35,6 +35,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
+        # Keep the pre-07:00 rollback image intact while the add-on is pinned to 0.2.9.
+        if: steps.version.outputs.version != '0.2.9'
         uses: docker/build-push-action@v6
         with:
           context: ./hikbridge
