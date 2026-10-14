@@ -23,6 +23,58 @@ import urllib.request
 
 _LOGGER = logging.getLogger("hikbridge.go2rtc")
 
+_DEFAULT_ICE_SERVERS = [
+    "stun:stun.cloudflare.com:3478",
+    "stun:stun.l.google.com:19302",
+]
+
+def _parse_ice_server(value: str) -> dict | None:
+    """Convert a compact option into go2rtc's ICE server shape."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        urls = payload.get("urls", payload.get("url"))
+        if isinstance(urls, str):
+            urls = [urls]
+        if not isinstance(urls, list):
+            return None
+        result: dict[str, object] = {
+            "urls": [str(url) for url in urls if str(url)],
+        }
+        if not result["urls"]:
+            return None
+        if payload.get("username") is not None:
+            result["username"] = str(payload["username"])
+        if payload.get("credential") is not None:
+            result["credential"] = str(payload["credential"])
+        return result
+
+    lower = text.lower()
+    if not lower.startswith(("stun:", "turn:", "turns:")):
+        return None
+    if lower.startswith("stun:"):
+        return {"urls": [text]}
+
+    scheme, rest = text.split(":", 1)
+    if "@" not in rest:
+        return {"urls": [text]}
+    userinfo, endpoint = rest.rsplit("@", 1)
+    username, separator, credential = userinfo.partition(":")
+    if not separator:
+        return {"urls": [text]}
+    return {
+        "urls": [f"{scheme}:{endpoint}"],
+        "username": urllib.parse.unquote(username),
+        "credential": urllib.parse.unquote(credential),
+    }
+
 
 class Go2RTCError(RuntimeError):
     """Raised when the WebRTC gateway cannot start or exchange SDP."""
@@ -38,7 +90,8 @@ class Go2RTCManager:
 
     def __init__(self, cameras, binary: str | None = None,
                  api_port: int = 11984, media_port: int = 18554,
-                 candidates: list[str] | None = None) -> None:
+                 candidates: list[str] | None = None,
+                 ice_servers: list[str] | None = None) -> None:
         self.cameras = [entry for entry in cameras if entry.rtsp_url]
         self.binary = (
             binary
@@ -50,6 +103,12 @@ class Go2RTCManager:
         self.media_port = int(media_port)
         self.candidates = [
             str(value).strip() for value in (candidates or []) if str(value).strip()
+        ]
+        selected_ice_servers = (
+            _DEFAULT_ICE_SERVERS if ice_servers is None else ice_servers
+        )
+        self.ice_servers = [
+            str(value).strip() for value in selected_ice_servers if str(value).strip()
         ]
         self.ice_ips: list[str] = []
         self.available = False
@@ -76,6 +135,7 @@ class Go2RTCManager:
             "port": self.media_port if self.available else None,
             "candidates": list(self.candidates),
             "ice_ips": list(self.ice_ips),
+            "ice_servers": list(self.ice_servers),
         }
 
     def start(self) -> bool:
@@ -182,7 +242,7 @@ class Go2RTCManager:
                     pass
         self._cleanup_config()
 
-    def exchange(self, entry, offer: str) -> str:
+    def exchange(self, entry, offer: str, request_host: str | None = None) -> str:
         """Forward one browser SDP offer and return go2rtc's SDP answer."""
         if not self.available:
             raise Go2RTCError(self.error or "WebRTC gateway is not available")
@@ -204,7 +264,65 @@ class Go2RTCManager:
             raise Go2RTCError(f"invalid go2rtc response: {exc}") from exc
         if not answer:
             raise Go2RTCError("go2rtc returned an empty SDP answer")
+        if request_host:
+            answer = self._add_request_candidate(answer, request_host)
         return answer
+
+    def _add_request_candidate(self, sdp: str, request_host: str) -> str:
+        """Add the browser-visible host as an ICE candidate when needed.
+
+        The configured candidates describe the HA host's LAN address. When
+        the UI is opened through a domain or public reverse proxy, that LAN
+        address is not reachable. The request Origin/Referer gives us the
+        hostname the browser actually used, so we can append a matching
+        candidate without hard-coding a deployment-specific address.
+        """
+        host = str(request_host or "").strip().lower()
+        if host.startswith("[") and "]" in host:
+            host = host[1:host.index("]")]
+        elif host.count(":") == 1:
+            host = host.rsplit(":", 1)[0]
+        if not host or host in {"localhost", "127.0.0.1", "::1"}:
+            return sdp
+        if not re.fullmatch(r"[a-z0-9.-]+", host):
+            return sdp
+
+        addresses: list[str] = []
+        try:
+            for item in socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_DGRAM):
+                address = str(item[4][0])
+                if address not in addresses:
+                    addresses.append(address)
+        except OSError:
+            return sdp
+
+        advertised = {candidate.rsplit(":", 1)[0] for candidate in self.candidates}
+        addresses = [address for address in addresses if address not in advertised]
+        addresses = addresses[:1]
+        if not addresses:
+            return sdp
+
+        candidate_lines = []
+        for index, address in enumerate(addresses, start=1):
+            candidate_lines.append(
+                f"a=candidate:900000{index:04d} 1 udp 2105458943 "
+                f"{address} {self.media_port} typ host"
+            )
+            candidate_lines.append(
+                f"a=candidate:900001{index:04d} 1 tcp 2105458943 "
+                f"{address} {self.media_port} typ host tcptype passive"
+            )
+
+        lines: list[str] = []
+        added = False
+        for line in sdp.splitlines():
+            lines.append(line)
+            if not added and line.startswith("a=mid:"):
+                lines.extend(candidate_lines)
+                added = True
+        if not added:
+            lines.extend(candidate_lines)
+        return "\r\n".join(lines) + "\r\n"
 
     def _write_config(self) -> None:
         self._config_dir = tempfile.mkdtemp(prefix="hikbridge-go2rtc-")
@@ -219,8 +337,28 @@ class Go2RTCManager:
             '  listen: "127.0.0.1:0"',
             "webrtc:",
             f'  listen: ":{self.media_port}"',
-            "  ice_servers: []",
         ]
+        if self.ice_servers:
+            lines.append("  ice_servers:")
+            for raw_server in self.ice_servers:
+                server = _parse_ice_server(raw_server)
+                if server is None:
+                    _LOGGER.warning("ignoring invalid WebRTC ICE server: %s", raw_server)
+                    continue
+                urls = server.get("urls") or []
+                lines.append("    - urls:")
+                for url in urls:
+                    lines.append(f"        - {json.dumps(str(url))}")
+                if server.get("username") is not None:
+                    lines.append(
+                        f"      username: {json.dumps(str(server['username']))}"
+                    )
+                if server.get("credential") is not None:
+                    lines.append(
+                        f"      credential: {json.dumps(str(server['credential']))}"
+                    )
+        else:
+            lines.append("  ice_servers: []")
         if self.candidates:
             lines.append("  candidates:")
             for candidate in self.candidates:
@@ -241,7 +379,15 @@ class Go2RTCManager:
             # packet loss on Wi-Fi otherwise shows up as frozen video.
             if "#" not in url:
                 url += "#transport=tcp"
-            lines.append(f"  {name}: {json.dumps(url, ensure_ascii=True)}")
+            lines.append(f"  {name}:")
+            lines.append(f"    - {json.dumps(url, ensure_ascii=True)}")
+            # Browsers do not decode AAC in WebRTC. go2rtc can reuse the
+            # RTSP source and transcode only its audio to Opus; cameras
+            # without an intercom/audio codec stay on the video-only source.
+            if getattr(entry.camera, "audio_codec", None):
+                lines.append(
+                    f"    - {json.dumps(f'ffmpeg:{name}#audio=opus', ensure_ascii=True)}"
+                )
         with open(self._config_path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
 

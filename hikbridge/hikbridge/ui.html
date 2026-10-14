@@ -417,10 +417,11 @@
   var streamMode = localStorage.getItem("hikbridge.player") || "webrtc";
   var webRtcAvailable = false;
   var liveState = {
-    source: null, buffer: null, abort: null, objectUrl: null,
+    source: null, buffer: null, abort: null, objectUrl: null, ws: null,
     queue: [], queueBytes: 0, active: false, restarting: false,
     mode: "mse", pc: null, remoteStream: null, hasAudio: null,
-    watchdog: null, lastFrameAt: 0, retries: 0, webRtcFallback: false
+    watchdog: null, lastFrameAt: 0, retries: 0, webRtcFallback: false,
+    transport: "ws", wsFallback: false, wsReceived: false
   };
 
   function updatePlayerUi() {
@@ -483,7 +484,13 @@
     touchLive();
     liveState.watchdog = setInterval(function () {
       if (!liveState.active || liveState.restarting) return;
-      if (Date.now() - liveState.lastFrameAt > 7000) restartLive("画面超过 7 秒没有推进");
+      if (Date.now() - liveState.lastFrameAt > 7000) {
+        if (liveState.mode === "webrtc") {
+          handleWebRTCFailure(new Error("WebRTC 超过 7 秒没有画面"));
+        } else {
+          restartLive("画面超过 7 秒没有推进");
+        }
+      }
     }, 2000);
   }
 
@@ -495,6 +502,7 @@
     liveState.active = false;
     clearLiveWatchdog();
     if (liveState.abort) { try { liveState.abort.abort(); } catch (e) {} }
+    if (liveState.ws) { try { liveState.ws.close(); } catch (e) {} }
     if (liveState.pc) { try { liveState.pc.close(); } catch (e) {} }
     if (liveState.source && liveState.source.readyState === "open") {
       try { liveState.source.endOfStream(); } catch (e) {}
@@ -502,6 +510,7 @@
     liveState.source = null;
     liveState.buffer = null;
     liveState.abort = null;
+    liveState.ws = null;
     liveState.pc = null;
     liveState.remoteStream = null;
     liveState.queue = [];
@@ -711,6 +720,9 @@
     liveState.source = source;
     liveState.objectUrl = URL.createObjectURL(source);
     liveState.hasAudio = !!current.audio_codec;
+    liveState.transport = "ws";
+    liveState.wsFallback = false;
+    liveState.wsReceived = false;
     source.addEventListener("sourceopen", openSource);
     live.src = liveState.objectUrl;
     live.style.display = "none";
@@ -728,6 +740,7 @@
       setLiveUi(true, liveState.hasAudio);
       live.play().catch(function () {});
     });
+
     function openSource() {
       if (!liveState.active || liveState.source !== source) return;
       var mime = liveMime();
@@ -738,32 +751,95 @@
       liveState.buffer.addEventListener("updateend", function () {
         syncLive(); trimLive(); pumpLive();
       });
-      var controller = new AbortController();
-      liveState.abort = controller;
-      fetch(withToken(BASE + camPath(current.id, "/live.mp4")), {
-        cache: "no-store", signal: controller.signal
-      }).then(function (resp) {
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        if (!resp.body || !resp.body.getReader) throw new Error("浏览器不支持流式响应");
-        var reader = resp.body.getReader();
-        startLiveWatchdog();
-        (function read() {
-          reader.read().then(function (result) {
-            if (result.done) {
-              if (liveState.active) restartLive("实时流已结束");
-              return;
-            }
-            enqueueLive(new Uint8Array(result.value));
-            read();
-          }).catch(function (e) {
-            if (e.name !== "AbortError" && liveState.active) failLive(e);
-          });
-        })();
-      }).catch(function (e) {
-        if (e.name !== "AbortError" && liveState.active) failLive(e);
-      });
+      startLiveSocket();
     }
   }
+
+  function startLiveSocket() {
+    if (!window.WebSocket) { startLiveHttp(); return; }
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    var ws;
+    try {
+      ws = new WebSocket(withToken(
+        proto + "//" + location.host + PATH_BASE + camPath(current.id, "/live.ws")
+      ));
+    } catch (e) {
+      startLiveHttp();
+      return;
+    }
+    liveState.ws = ws;
+    ws.binaryType = "arraybuffer";
+    ws.onopen = function () {
+      if (!liveState.active || liveState.ws !== ws) return;
+      startLiveWatchdog();
+    };
+    ws.onmessage = function (ev) {
+      if (!liveState.active || liveState.ws !== ws) return;
+      if (typeof ev.data === "string") {
+        try {
+          var info = JSON.parse(ev.data);
+          if (info && info.ok === false) throw new Error(info.error || "实时流被拒绝");
+        } catch (e) {
+          failLive(e);
+        }
+        return;
+      }
+      liveState.wsReceived = true;
+      touchLive();
+      enqueueLive(new Uint8Array(ev.data));
+    };
+    ws.onerror = function () {
+      if (liveState.active && !liveState.wsReceived) fallbackLiveHttp();
+    };
+    ws.onclose = function () {
+      if (!liveState.active || liveState.ws !== ws) return;
+      if (liveState.wsReceived) restartLive("实时流连接已断开");
+      else fallbackLiveHttp();
+    };
+  }
+
+  function fallbackLiveHttp() {
+    if (!liveState.active || liveState.transport !== "ws" || liveState.wsFallback) return;
+    liveState.wsFallback = true;
+    liveState.transport = "http";
+    var ws = liveState.ws;
+    liveState.ws = null;
+    if (ws) { try { ws.close(); } catch (e) {} }
+    log("实时 WebSocket 不可用，切换到 HTTP 兼容模式…", "e");
+    setTimeout(startLiveHttp, 400);
+  }
+
+  function startLiveHttp() {
+    if (!liveState.active || !current) return;
+    liveState.transport = "http";
+    var controller = new AbortController();
+    liveState.abort = controller;
+    fetch(withToken(BASE + camPath(current.id, "/live.mp4")), {
+      cache: "no-store", signal: controller.signal
+    }).then(function (resp) {
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      if (!resp.body || !resp.body.getReader) throw new Error("浏览器不支持流式响应");
+      var reader = resp.body.getReader();
+      startLiveWatchdog();
+      (function read() {
+        reader.read().then(function (result) {
+          if (result.done) {
+            if (liveState.active) restartLive("实时流已结束");
+            return;
+          }
+          liveState.wsReceived = true;
+          touchLive();
+          enqueueLive(new Uint8Array(result.value));
+          read();
+        }).catch(function (e) {
+          if (e.name !== "AbortError" && liveState.active) failLive(e);
+        });
+      })();
+    }).catch(function (e) {
+      if (e.name !== "AbortError" && liveState.active) failLive(e);
+    });
+  }
+
 
   function startLive() {
     if (!current || !current.live) {

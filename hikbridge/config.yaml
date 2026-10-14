@@ -1,5 +1,5 @@
 name: "Hikvision PTZ Bridge"
-version: "0.2.18"
+version: "0.2.19"
 slug: "hikbridge"
 description: "PTZ control, snapshots, live two-way talk and speaker playback for Hikvision/EZVIZ cameras over the private protocol (TCP 8000)"
 url: "https://github.com/wangling75/ha-hikbridge"
@@ -36,6 +36,11 @@ options:
   webrtc_port: 18554
   webrtc_api_port: 11984
   webrtc_candidates: []
+  # STUN is enough for LAN and many port-forwarded homes. For a remote
+  # browser that cannot receive direct UDP/TCP, add a TURN URL below.
+  webrtc_ice_servers:
+    - "stun:stun.cloudflare.com:3478"
+    - "stun:stun.l.google.com:19302"
 schema:
   cameras:
     - id: str?
@@ -56,4 +61,6 @@ schema:
   webrtc_port: port?
   webrtc_api_port: port?
   webrtc_candidates:
+    - str?
+  webrtc_ice_servers:
     - str?

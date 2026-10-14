@@ -22,6 +22,8 @@ Debian, so the SDK loads there, and it is reachable from Home Assistant on
   snapshot fallback/download, PTZ pad and click-to-toggle talk
 * Standalone WebRTC playback through the bundled go2rtc gateway, with an
   automatic fragmented-MP4 fallback (`/live.mp4`) when WebRTC is unavailable
+* Same-origin WebSocket/MSE fallback (`/live.ws`) for remote HA ingress and
+  reverse-proxy deployments where the WebRTC media port is not forwarded
 
 WebRTC does not require Scrypted. The add-on starts go2rtc on media port
 `18554/tcp+udp`, keeps the go2rtc API on `127.0.0.1:11984`, and proxies only
@@ -30,6 +32,10 @@ automatically uses the LAN source address for each camera as the ICE address,
 so Supervisor bridge addresses such as `172.30.32.1` are not advertised to a
 LAN browser. Its internal RTSP relay uses a random loopback port, so HA's own
 `8554` listener is untouched.
+Camera audio is transcoded to Opus for browser WebRTC. Remote HA sidebars use
+the same-origin WebSocket fallback when direct WebRTC media cannot connect.
+For direct remote WebRTC, forward UDP/TCP 18554 or configure a TURN server in
+`webrtc_ice_servers`.
 Browsers cannot play an
 `rtsp://` URL directly; Home Assistant's RTSP cards also relay the stream
 server-side. Cameras without an audio track (for example the 225) show
@@ -101,6 +107,9 @@ webrtc: true
 webrtc_port: 18554
 webrtc_api_port: 11984
 webrtc_candidates: []
+webrtc_ice_servers:
+  - "stun:stun.cloudflare.com:3478"
+  - "stun:stun.l.google.com:19302"
 ```
 
 | Option | Meaning |
@@ -115,6 +124,7 @@ webrtc_candidates: []
 | `webrtc_port` | go2rtc media port for TCP and UDP, default `18554` |
 | `webrtc_api_port` | Loopback-only go2rtc API port, default `11984` |
 | `webrtc_candidates` | Extra advertised WebRTC addresses; required as `host-ip:18554` for bridged Docker port mapping. Leave empty for the HA add-on so the LAN address is auto-detected |
+| `webrtc_ice_servers` | STUN/TURN servers. Supports `stun:host:port`, `turn:user:pass@host:port`, or a JSON ICE server object string |
 
 Browsers only expose `navigator.mediaDevices` on secure origins, so the web
 UI press-to-talk button cannot record over plain HTTP. Turn `ssl` on and open
@@ -134,6 +144,7 @@ GET  /health                              {"ok": true, "cameras": [...]}
 GET  /api/cameras                         camera list
 GET  /api/cameras/<id>/snapshot.jpg       image/jpeg (?download=1 saves it)
 GET  /api/cameras/<id>/live.mp4           fragmented MP4: RTSP video + AAC audio
+GET  /api/cameras/<id>/live.ws            WebSocket: same fragmented MP4 (remote fallback)
 POST /api/cameras/<id>/webrtc             {"sdp": "..."} -> WebRTC SDP answer
 POST /api/cameras/<id>/ptz                {"direction": "right", "duration": 0.6}
 POST /api/cameras/<id>/ptz/start          {"direction": "right"}

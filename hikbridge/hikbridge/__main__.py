@@ -207,11 +207,17 @@ def main(argv: list[str] | None = None) -> int:
                 [str(value) for value in raw_candidates if str(value).strip()]
                 if isinstance(raw_candidates, list) else []
             )
+            raw_ice_servers = options.get("webrtc_ice_servers")
+            webrtc_ice_servers = (
+                [str(value) for value in raw_ice_servers if str(value).strip()]
+                if isinstance(raw_ice_servers, list) else None
+            )
             webrtc = Go2RTCManager(
                 cameras,
                 api_port=webrtc_api_port,
                 media_port=webrtc_media_port,
                 candidates=webrtc_candidates,
+                ice_servers=webrtc_ice_servers,
             )
         except (TypeError, ValueError) as exc:
             _LOGGER.error("invalid WebRTC port configuration: %s", exc)

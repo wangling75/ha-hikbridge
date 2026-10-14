@@ -8,6 +8,7 @@ several cameras at once:
   GET  /api/cameras                      -> {"ok": true, "cameras": [...]}
   GET  /api/cameras/<id>/snapshot.jpg    -> image/jpeg (?download=1 saves it)
   GET  /api/cameras/<id>/live.mp4        -> fragmented MP4 (video + AAC) for the web UI
+  GET  /api/cameras/<id>/live.ws         -> same fragmented MP4 over WebSocket
   POST /api/cameras/<id>/ptz             {"direction": "right", "duration": 0.6}
   POST /api/cameras/<id>/ptz/start       {"direction": "right"}
   POST /api/cameras/<id>/ptz/stop
@@ -179,6 +180,22 @@ def _handler(state: _State):
             length = int(self.headers.get("Content-Length") or 0)
             return self.rfile.read(length) if length else b""
 
+        def _request_host(self) -> str | None:
+            """Return the host the browser used, including reverse proxies."""
+            origin = self.headers.get("Origin") or ""
+            if origin:
+                parsed = urlparse(origin)
+                if parsed.hostname:
+                    return parsed.hostname
+            forwarded = self.headers.get("X-Forwarded-Host") or ""
+            if forwarded:
+                return forwarded.split(",", 1)[0].strip()
+            host = self.headers.get("Host") or ""
+            if host:
+                parsed = urlparse("//" + host)
+                return parsed.hostname or host
+            return None
+
         def _entry_for(self, parts: list[str]) -> tuple[CameraEntry | None, str]:
             """Resolve /api/cameras/<id>/<action> or fall back to camera #1."""
             if len(parts) >= 4 and parts[0] == "api" and parts[1] == "cameras":
@@ -245,6 +262,9 @@ def _handler(state: _State):
                     return
                 if action in ("live", "live.mp4"):
                     self._live(entry)
+                    return
+                if action == "live.ws":
+                    self._live_ws(entry)
                     return
                 if action == "talk":
                     self._talk(entry)
@@ -381,12 +401,35 @@ def _handler(state: _State):
                 self._json(400, {"ok": False, "error": "missing sdp"})
                 return
             try:
-                answer = state.webrtc.exchange(entry, offer)
+                answer = state.webrtc.exchange(entry, offer, self._request_host())
             except Go2RTCError as exc:
                 _LOGGER.warning("WebRTC exchange failed for %s: %s", entry.id, exc)
                 self._json(502, {"ok": False, "error": str(exc)})
                 return
             self._json(200, {"ok": True, "type": "answer", "sdp": answer})
+
+        def _live_command(self, entry: CameraEntry) -> list[str]:
+            """Build the low-CPU fragmented MP4 command shared by both transports."""
+            return [
+                "ffmpeg", "-hide_banner", "-loglevel", "warning",
+                # Keep the RTSP input close to real time. The previous defaults
+                # could spend several seconds probing before the first frame.
+                "-analyzeduration", "500000", "-probesize", "500000",
+                "-rtsp_transport", "tcp", "-i", entry.rtsp_url,
+                "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+                # Copy the camera's H.264 instead of re-encoding it. The old
+                # libx264 pass was the main CPU spike and the reason a second
+                # live view could make HA look disconnected.
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "64k",
+                "-ar", "48000", "-ac", "1",
+                "-af",
+                "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0:min_hard_comp=0.1",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "empty_moov+default_base_moof",
+                "-frag_duration", "100000",
+                "-flush_packets", "1", "-f", "mp4", "pipe:1",
+            ]
 
         def _live(self, entry: CameraEntry) -> None:
             """Stream RTSP to the browser as fragmented MP4.
@@ -423,26 +466,7 @@ def _handler(state: _State):
             # a whole second before it could append anything. A 200 ms
             # fragment keeps the browser close to the live edge while the
             # keyframe interval remains conservative for bandwidth.
-            command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "warning",
-                # Keep the RTSP input close to real time. The previous defaults
-                # could spend several seconds probing before the first frame.
-                "-analyzeduration", "500000", "-probesize", "500000",
-                "-rtsp_transport", "tcp", "-i", entry.rtsp_url,
-                "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
-                # Copy the camera's H.264 instead of re-encoding it. The old
-                # libx264 pass was the main CPU spike and the reason a second
-                # live view could make HA look disconnected.
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "64k",
-                "-ar", "48000", "-ac", "1",
-                "-af",
-                "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0:min_hard_comp=0.1",
-                "-avoid_negative_ts", "make_zero",
-                "-movflags", "empty_moov+default_base_moof",
-                "-frag_duration", "100000",
-                "-flush_packets", "1", "-f", "mp4", "pipe:1",
-            ]
+            command = self._live_command(entry)
             try:
                 proc = subprocess.Popen(
                     command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -501,6 +525,92 @@ def _handler(state: _State):
                     self.wfile.flush()
                 except OSError:
                     pass
+
+        def _live_ws(self, entry: CameraEntry) -> None:
+            """Stream the same fragmented MP4 through a same-origin WebSocket.
+
+            HA ingress and ordinary HTTPS reverse proxies reliably carry
+            WebSocket upgrades, while some buffer long chunked HTTP responses.
+            Keeping this transport on the page origin also avoids exposing the
+            WebRTC media port for remote sidebars.
+            """
+            ws = WebSocket(self)
+            try:
+                ws.handshake()
+            except WebSocketError as exc:
+                _LOGGER.debug("live WebSocket handshake failed: %s", exc)
+                return
+
+            if not entry.rtsp_url:
+                ws.send_text(json.dumps({"ok": False, "error": "camera has no rtsp_url configured"}))
+                ws.close()
+                return
+            if not shutil.which("ffmpeg"):
+                ws.send_text(json.dumps({"ok": False, "error": "ffmpeg is not installed"}))
+                ws.close()
+                return
+
+            with entry.lock:
+                if entry.live_clients >= 1:
+                    ws.send_text(json.dumps({
+                        "ok": False,
+                        "error": "another live view is already using this camera",
+                    }))
+                    ws.close()
+                    return
+                entry.live_clients += 1
+
+            try:
+                proc = subprocess.Popen(
+                    self._live_command(entry), stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, bufsize=0,
+                )
+            except OSError as exc:
+                with entry.lock:
+                    entry.live_clients = max(0, entry.live_clients - 1)
+                ws.send_text(json.dumps({
+                    "ok": False, "error": f"cannot start ffmpeg: {exc}",
+                }))
+                ws.close()
+                return
+
+            if proc.stderr is not None:
+                def _drain_stderr() -> None:
+                    for line in iter(proc.stderr.readline, b""):
+                        text = line.decode("utf-8", "replace").strip()
+                        if text:
+                            _LOGGER.debug("live ffmpeg: %s", text)
+                threading.Thread(
+                    target=_drain_stderr, name="hikbridge-live-ws-ffmpeg",
+                    daemon=True,
+                ).start()
+
+            try:
+                self.connection.setsockopt(
+                    socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
+                )
+            except OSError:
+                pass
+
+            ws.send_text(json.dumps({"ok": True, "camera": entry.id, "transport": "websocket"}))
+            try:
+                assert proc.stdout is not None
+                while True:
+                    chunk = os.read(proc.stdout.fileno(), 16384)
+                    if not chunk:
+                        break
+                    ws.send_binary(chunk)
+            except (BrokenPipeError, ConnectionResetError, OSError, WebSocketError):
+                pass
+            finally:
+                with entry.lock:
+                    entry.live_clients = max(0, entry.live_clients - 1)
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    proc.kill()
+                ws.close()
 
         def _talk(self, entry: CameraEntry) -> None:
             """Live push-to-talk: browser streams PCM16 mono over a WebSocket."""
